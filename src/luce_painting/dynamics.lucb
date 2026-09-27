@@ -1,0 +1,225 @@
+## Brush dynamics, as Photoshop's Shape Dynamics and Transfer "Control:"
+## menus, extended to a pen's tilt, azimuth, barrel rotation and airbrush
+## wheel: each brush parameter may follow one control, from its minimum (at
+## the control's 0) to its full value (at 1), through a response curve. The
+## angle instead turns by the control: the pen's azimuth, its rotation or the
+## stroke's direction exactly, anything else over the full circle.
+import math
+from raster_errors import invalid
+
+## What drives a parameter.
+pub enum Control as u8:
+    off = 0
+    ## The pen's pressure (a mouse presses fully).
+    pressure = 1
+    ## How far the pen leans from upright: 0 upright, 1 at 60 degrees or more.
+    tilt = 2
+    ## Which way the pen leans on the tablet: its azimuth.
+    azimuth = 3
+    ## The pen's barrel rotation (an Art Pen's twist).
+    rotation = 4
+    ## The airbrush finger wheel.
+    wheel = 5
+    ## Which way the stroke is heading.
+    direction = 6
+    ## How fast the stroke moves: 0 still, towards 1 fast.
+    velocity = 7
+    ## From full to the minimum over the first `steps` dabs.
+    fade = 8
+
+## The parameters dynamics can drive, as indices into `Brush.dynamics`.
+pub let dynamic_size: usize = 0
+pub let dynamic_flow: usize = 1
+pub let dynamic_opacity: usize = 2
+pub let dynamic_angle: usize = 3
+pub let dynamic_roundness: usize = 4
+pub let dynamic_scatter: usize = 5
+pub let dynamic_texture_depth: usize = 6
+pub let dynamic_hue: usize = 7
+pub let dynamic_saturation: usize = 8
+pub let dynamic_brightness: usize = 9
+pub let dynamic_count: usize = 10
+
+## One parameter's mapping. The zero value is off, linear.
+pub struct Dynamic:
+    pub var control: Control
+    ## 0..1: the fraction of the value left when the control reads 0.
+    pub var minimum: f64
+    ## -1..1: the response curve, the control raised to 4^-curve: 0 linear,
+    ## positive soft (full value from a light touch), negative firm.
+    pub var curve: f64
+    ## Fade's length in dabs, 1..10000 (0 reads as 25).
+    pub var steps: i64
+
+    pub func check() -> !:
+        if (u8)self.control > (u8)Control.fade or not (self.minimum >= 0.0 and self.minimum <= 1.0) or not (self.curve >= -1.0 and self.curve <= 1.0) or self.steps < 0 or self.steps > 10000:
+            error(invalid, "a dynamic's minimum must be 0..1, its curve -1..1 and its fade 0..10000 steps")
+
+## A pen sample, as a stroke point carries it: pressure 0..1 (1 for a mouse:
+## the caller decides from the pointer, not from a zero),
+## the lean's azimuth (degrees clockwise from the right) and altitude (90
+## upright), barrel rotation in degrees, the airbrush wheel -1..1, and the
+## time in milliseconds (0 when unknown).
+pub struct Pen:
+    pub var pressure: f64 = 1.0
+    pub var azimuth: f64 = 0.0
+    pub var altitude: f64 = 90.0
+    pub var rotation: f64 = 0.0
+    pub var tangential: f64 = 0.0
+    pub var time: f64 = 0.0
+
+## Everything the controls read for one dab.
+pub struct Inputs:
+    pub var pen: Pen = Pen()
+    ## The stroke's heading in degrees clockwise from the right.
+    pub var direction: f64 = 0.0
+    ## 0..1, from `velocity_value`.
+    pub var velocity: f64 = 0.0
+    ## Which step of the stroke this is, from 0.
+    pub var step: i64 = 0
+
+## A pressure as a stroke keeps it, 0..1. Zero is a pen touching lightly (its
+## first and last samples), the control's minimum; a mouse's stroke carries
+## 1, as `Pen()` does. Only a value that is not a number reads as a full press.
+pub func pen_pressure(pressure: f64) -> f64:
+    if not math.is_finite(pressure):
+        return 1.0
+    return math.clamp(pressure, 0.0, 1.0)
+
+## What `control` reads for these inputs, 0..1.
+pub func control_value(control: Control, inputs: Inputs, steps: i64) -> f64:
+    let pen = inputs.pen
+    if control == Control.pressure:
+        return pen_pressure(pen.pressure)
+    if control == Control.tilt:
+        return math.clamp((90.0 - pen.altitude) / 60.0, 0.0, 1.0) if math.is_finite(pen.altitude) else 0.0
+    if control == Control.azimuth:
+        return circle(pen.azimuth) / 360.0
+    if control == Control.rotation:
+        return circle(pen.rotation) / 360.0
+    if control == Control.wheel:
+        return math.clamp(pen.tangential, 0.0, 1.0) if math.is_finite(pen.tangential) else 0.0
+    if control == Control.direction:
+        return circle(inputs.direction) / 360.0
+    if control == Control.velocity:
+        return math.clamp(inputs.velocity, 0.0, 1.0)
+    if control == Control.fade:
+        let length = (f64)(steps if steps > 0 else 25)
+        return math.clamp(1.0 - (f64)inputs.step / length, 0.0, 1.0)
+    return 1.0
+
+## The factor a parameter is multiplied by: 1 when off, else from `minimum`
+## at a control of 0 to 1 at 1, through the curve.
+pub func response(dynamic: Dynamic, inputs: Inputs) -> f64:
+    if dynamic.control == Control.off:
+        return 1.0
+    let value = control_value(dynamic.control, inputs, dynamic.steps)
+    return dynamic.minimum + (1.0 - dynamic.minimum) * shaped(value, dynamic.curve)
+
+## The degrees the angle's control turns the tip by: the azimuth, the
+## rotation or the heading as they are; any other control over the circle.
+pub func angle_turn(dynamic: Dynamic, inputs: Inputs) -> f64:
+    if dynamic.control == Control.off:
+        return 0.0
+    if dynamic.control == Control.azimuth:
+        return circle(inputs.pen.azimuth)
+    if dynamic.control == Control.rotation:
+        return circle(inputs.pen.rotation)
+    if dynamic.control == Control.direction:
+        return circle(inputs.direction)
+    return shaped(control_value(dynamic.control, inputs, dynamic.steps), dynamic.curve) * 360.0
+
+## `value` 0..1 through the curve: raised to 4^-curve.
+pub func shaped(value: f64, curve: f64) -> f64:
+    let clamped = math.clamp(value, 0.0, 1.0)
+    if curve == 0.0 or clamped == 0.0 or clamped == 1.0:
+        return clamped
+    return math.pow(clamped, math.pow(4.0, -math.clamp(curve, -1.0, 1.0)))
+
+## The velocity control from a speed in document pixels per millisecond,
+## relative to the brush's diameter: a diameter every 20 ms reads about 0.63.
+pub func velocity_value(speed: f64, diameter: f64) -> f64:
+    if not math.is_finite(speed) or speed <= 0.0:
+        return 0.0
+    return 1.0 - math.exp(-speed * 20.0 / math.max(diameter, 1.0))
+
+## An angle in degrees brought into 0..360.
+pub func circle(degrees: f64) -> f64:
+    if not math.is_finite(degrees):
+        return 0.0
+    return degrees - math.floor(degrees / 360.0) * 360.0
+
+## The pen between `start` and `finish` at `t` (0..1): each value along the way,
+## the angles the short way round.
+pub func blend_pens(start: Pen, finish: Pen, t: f64) -> Pen:
+    return Pen(pressure = start.pressure + (finish.pressure - start.pressure) * t,
+               azimuth = circle(start.azimuth + turn_between(start.azimuth, finish.azimuth) * t),
+               altitude = start.altitude + (finish.altitude - start.altitude) * t,
+               rotation = circle(start.rotation + turn_between(start.rotation, finish.rotation) * t),
+               tangential = start.tangential + (finish.tangential - start.tangential) * t,
+               time = start.time + (finish.time - start.time) * t)
+
+## The shortest signed turn from `start` to `finish` degrees, -180..180.
+func turn_between(start: f64, finish: f64) -> f64:
+    var turn = circle(finish - start)
+    if turn > 180.0:
+        turn -= 360.0
+    return turn
+
+func near(a: f64, b: f64) -> bool:
+    return math.abs(a - b) < 1e-9
+
+test "an off dynamic leaves the parameter whole and the angle unturned":
+    let inputs = Inputs(pen = Pen(pressure = 0.2))
+    assert(response(Dynamic(), inputs) == 1.0 and angle_turn(Dynamic(), inputs) == 0.0)
+
+test "pressure scales from the minimum to full, a mouse pressing fully":
+    let size = Dynamic(control = Control.pressure, minimum = 0.2)
+    assert(near(response(size, Inputs(pen = Pen(pressure = 0.5))), 0.6))
+    # A pen touching with no pressure is at the minimum, not full.
+    assert(near(response(size, Inputs(pen = Pen(pressure = 0.0))), 0.2))
+    assert(near(response(size, Inputs(pen = Pen())), 1.0))
+    assert(near(response(size, Inputs(pen = Pen(pressure = math.nan))), 1.0))
+    assert(near(response(size, Inputs(pen = Pen(pressure = 1.0))), 1.0))
+    assert(near(response(size, Inputs(pen = Pen(pressure = 0.25))), 0.4))
+
+test "the response curve bends the control soft or firm":
+    assert(near(shaped(0.25, 0.0), 0.25))
+    assert(near(shaped(0.25, 0.5), 0.5))
+    assert(near(shaped(0.25, -0.5), 0.0625))
+    assert(shaped(0.0, 1.0) == 0.0 and shaped(1.0, -1.0) == 1.0)
+    let soft = Dynamic(control = Control.pressure, curve = 1.0)
+    assert(response(soft, Inputs(pen = Pen(pressure = 0.1))) > 0.5)
+
+test "tilt reads the pen's lean, zero upright and full at 60 degrees":
+    let tilted = Dynamic(control = Control.tilt)
+    assert(response(tilted, Inputs(pen = Pen(altitude = 90.0))) == 0.0)
+    assert(near(response(tilted, Inputs(pen = Pen(altitude = 60.0))), 0.5))
+    assert(response(tilted, Inputs(pen = Pen(altitude = 10.0))) == 1.0)
+
+test "the angle follows the azimuth, the rotation or the heading exactly":
+    let inputs = Inputs(pen = Pen(azimuth = 450.0, rotation = -30.0), direction = 200.0)
+    assert(angle_turn(Dynamic(control = Control.azimuth), inputs) == 90.0)
+    assert(angle_turn(Dynamic(control = Control.rotation), inputs) == 330.0)
+    assert(angle_turn(Dynamic(control = Control.direction), inputs) == 200.0)
+    assert(near(angle_turn(Dynamic(control = Control.pressure), Inputs(pen = Pen(pressure = 0.5))), 180.0))
+
+test "the wheel, velocity and fade read 0..1":
+    assert(control_value(Control.wheel, Inputs(pen = Pen(tangential = 0.75)), 0) == 0.75)
+    assert(control_value(Control.wheel, Inputs(pen = Pen(tangential = -0.5)), 0) == 0.0)
+    assert(velocity_value(0.0, 10.0) == 0.0 and velocity_value(100.0, 10.0) > 0.99)
+    assert(near(velocity_value(0.5, 10.0), 1.0 - math.exp(-1.0)))
+    assert(control_value(Control.fade, Inputs(step = 0), 10) == 1.0)
+    assert(near(control_value(Control.fade, Inputs(step = 5), 10), 0.5))
+    assert(control_value(Control.fade, Inputs(step = 50), 10) == 0.0)
+    assert(near(control_value(Control.fade, Inputs(step = 5), 0), 0.8))
+
+test "pens blend the short way round":
+    let pen = blend_pens(Pen(pressure = 0.2, azimuth = 350.0, altitude = 80.0), Pen(pressure = 0.6, azimuth = 10.0, altitude = 60.0), 0.5)
+    assert(near(pen.pressure, 0.4) and near(pen.azimuth, 0.0) and near(pen.altitude, 70.0))
+
+test "a dynamic out of range is refused":
+    Dynamic(minimum = 1.5).check() catch failure:
+        assert(failure.code == invalid)
+        return
+    assert(false)

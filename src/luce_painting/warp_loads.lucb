@@ -1,0 +1,229 @@
+## Reading a smudge's cells in without ever waiting on the GPU.
+##
+## Recording a point asks for the cells its dabs can reach (`request`); `start`
+## sends what was asked as one batch of reads, and `poll`, once a frame, hands
+## over the cells of a batch the GPU has finished. Nothing on the way from a
+## pointer event to the queue waits: a read is recorded and submitted, and
+## looked at again a frame later. Only one batch is on the GPU at a time, which
+## leaves the device's other readback slots to everything else. A finished
+## batch's cells are turned into the working copy's samples across the
+## processors, so a frame spends little on them.
+import math
+import memory
+import pool
+import gpu
+from tiles import Tiles, tile_size
+from half import from_half
+
+## A cell of the working copy: 256 rows of 256 premultiplied RGBA f32 samples.
+pub let cell_samples: usize = (usize)tile_size * (usize)tile_size * 4
+## The same cell as a tile holds it: 256 rows of 256 texels of four straight-alpha
+## half floats, 8 bytes each.
+pub let cell_bytes: usize = (usize)tile_size * (usize)tile_size * 8
+
+## What `start` and `poll` hand over: cell `index`'s samples and its bytes as
+## the tile holds them (both owned by the visitor).
+pub type CellVisit = func(void*?, usize, f32[], u8[]) -> unit!
+
+## Where a batch put a cell: its index and its offset in the batch.
+struct Placed:
+    var index: u32
+    var offset: usize
+    var rows: u32
+    ## The document's columns in the cell (fewer in the last column of cells).
+    var columns: u32
+
+pub struct CellLoader:
+    var columns: usize
+    ## Per cell: asked for, read in, or on its way.
+    var requested: bool[]
+    ## Asked for and not yet sent, oldest first.
+    var wanted: u32[]
+    var wanted_head: usize
+    var wanted_count: usize
+    ## The batch on the GPU, and where it put each cell.
+    var batch: gpu.ReadBatch
+    var sent: bool
+    var placed: Placed[]
+    var placed_count: usize
+    ## Each half float's sRGB-encoded value (mixing.lucb's table, borrowed)
+    ## when the samples are to be encoded; empty keeps them in linear light.
+    pub var encoded: f32[]
+
+    ## A loader for `count` cells, `columns` a row.
+    pub static func create(count: usize, columns: usize) -> CellLoader!:
+        let requested = try alloc bool[count] in memory.heap
+        errdefer free(requested) in memory.heap
+        for index in 0..<count:
+            requested[index] = false
+        let wanted = try alloc u32[64] in memory.heap
+        errdefer free(wanted) in memory.heap
+        let placed = try alloc Placed[64] in memory.heap
+        var linear: f32[]
+        return CellLoader(columns = columns, requested = requested, wanted = wanted, wanted_head = 0, wanted_count = 0,
+                          batch = gpu.ReadBatch(), sent = false, placed = placed, placed_count = 0, encoded = linear)
+
+    pub mutating func destroy():
+        if self.sent:
+            self.batch.finish()
+            self.sent = false
+        free(self.requested) in memory.heap
+        free(self.wanted) in memory.heap
+        free(self.placed) in memory.heap
+
+    ## Whether cell `index` was asked for (or read in some other way).
+    pub func asked(index: usize) -> bool:
+        return self.requested[index]
+
+    ## Cell `index` is in hand without a read (read in directly).
+    pub mutating func have(index: usize):
+        self.requested[index] = true
+
+    ## Ask for cell `index`, once.
+    pub mutating func request(index: usize) -> !:
+        if self.requested[index]:
+            return
+        self.requested[index] = true
+        if self.wanted_count == self.wanted.length:
+            let grown = try alloc u32[self.wanted.length * 2] in memory.heap
+            for at in 0..<self.wanted_count:
+                grown[at] = self.wanted[(self.wanted_head + at) % self.wanted.length]
+            free(self.wanted) in memory.heap
+            self.wanted = grown
+            self.wanted_head = 0
+        self.wanted[(self.wanted_head + self.wanted_count) % self.wanted.length] = (u32)index
+        self.wanted_count += 1
+
+    ## Whether nothing is asked for or on its way.
+    pub func idle() -> bool:
+        return self.wanted_count == 0 and not self.sent
+
+    ## Send what was asked for as one batch, unless one is on the GPU already.
+    ## A cell with no tile needs no read: `visit` has it at once, with no bytes.
+    pub mutating func start(source: const Tiles*, context: void*?, visit: CellVisit) -> !:
+        if self.sent or self.wanted_count == 0:
+            return
+        var batch = try gpu.ReadBatch.begin(source.device())
+        errdefer batch.finish()
+        var count: usize = 0
+        while self.wanted_count > 0:
+            let index = (usize)self.wanted[self.wanted_head]
+            let column = (u32)(index % self.columns)
+            let row = (u32)(index // self.columns)
+            if let texture = try source.texture(column, row):
+                let area = source.region(column, row)
+                let reserved = try batch.reserve((usize)area.height * (usize)tile_size * 8)
+                if reserved == none:
+                    # The batch is full; the rest goes in the next one.
+                    break
+                let offset = reserved else trap("reserved")
+                try batch.copy(texture, gpu.Region(0, 0, tile_size, area.height), offset)
+                if count == self.placed.length:
+                    let grown = try alloc Placed[self.placed.length * 2] in memory.heap
+                    memory.copy(grown, self.placed, count)
+                    free(self.placed) in memory.heap
+                    self.placed = grown
+                self.placed[count] = Placed(index = (u32)index, offset = offset, rows = area.height, columns = area.width)
+                count += 1
+            else:
+                let clear = try alloc f32[cell_samples] in memory.heap
+                errdefer free(clear) in memory.heap
+                for at in 0..<clear.length:
+                    clear[at] = 0.0
+                let none_there = try alloc u8[cell_bytes] in memory.heap
+                memory.set(none_there, 0)
+                try visit(context, index, clear, none_there)
+            self.wanted_head = (self.wanted_head + 1) % self.wanted.length
+            self.wanted_count -= 1
+        if count == 0:
+            batch.finish()
+            return
+        try batch.submit()
+        self.batch = batch
+        self.sent = true
+        self.placed_count = count
+
+    ## Hand the cells of the batch on the GPU to `visit` once it is done: at
+    ## once when `block`, else only if the GPU has finished it. Whether a batch
+    ## was handed over.
+    pub mutating func poll(block: bool, context: void*?, visit: CellVisit) -> bool!:
+        if not self.sent:
+            return false
+        if block:
+            try self.batch.wait()
+        elif not (try self.batch.ready()):
+            return false
+        # Every cell's samples, made across the processors, then handed over.
+        let count = self.placed_count
+        let made = try alloc Unpack[count] in memory.heap
+        defer free(made) in memory.heap
+        var allocated: usize = 0
+        for at in 0..<count:
+            let place = self.placed[at]
+            let pixels = alloc f32[cell_samples] in memory.heap catch failure:
+                for other in 0..<allocated:
+                    free(made[other].pixels) in memory.heap
+                    free(made[other].halves) in memory.heap
+                error(failure.code, failure.message)
+            let halves = alloc u8[cell_bytes] in memory.heap catch failure:
+                free(pixels) in memory.heap
+                for other in 0..<allocated:
+                    free(made[other].pixels) in memory.heap
+                    free(made[other].halves) in memory.heap
+                error(failure.code, failure.message)
+            made[at] = Unpack(bytes = try self.batch.bytes(place.offset, (usize)place.rows * (usize)tile_size * 8), pixels = pixels, halves = halves, columns = (usize)place.columns,
+                              encoded = self.encoded)
+            allocated += 1
+        try unpack_all(made)
+        for at in 0..<count:
+            try visit(context, (usize)self.placed[at].index, made[at].pixels, made[at].halves)
+        self.batch.finish()
+        self.sent = false
+        self.placed_count = 0
+        return true
+
+## One cell to turn from read-back bytes into samples.
+struct Unpack:
+    var bytes: const u8[]
+    var pixels: f32[]
+    var halves: u8[]
+    var columns: usize
+    var encoded: f32[]
+
+## A cell's read-back bytes (rows of 256 texels of four half floats, straight
+## alpha) as premultiplied f32 samples in `pixels`, 256 by 256, and kept as
+## they are in `halves` (the tile's own bytes, for uploading the cell again
+## without converting it): only the document's `columns` of each row; the rest,
+## and rows not read, clear. With `encoded` (a table of every half float's
+## sRGB-encoded value) the samples hold encoded colors, for mixing those.
+pub func unpack_cell(bytes: const u8[], columns: usize, pixels: f32[], halves: u8[], encoded: const f32[]):
+    for index in 0..<pixels.length:
+        pixels[index] = 0.0
+    memory.set(halves, 0)
+    let row_bytes = (usize)tile_size * 8
+    for y in 0..<bytes.length // row_bytes:
+        let start = y * row_bytes
+        memory.copy(halves[start..<start + columns * 8], bytes[start..<start + columns * 8], columns * 8)
+        for x in 0..<columns:
+            let at = y * (usize)tile_size + x
+            let alpha = from_half((u16)bytes[at * 8 + 6] | ((u16)bytes[at * 8 + 7] << 8))
+            for channel in 0..<(usize)3:
+                let bits = (u16)bytes[at * 8 + channel * 2] | ((u16)bytes[at * 8 + channel * 2 + 1] << 8)
+                pixels[at * 4 + channel] = (encoded[(usize)bits] if encoded.length > 0 else from_half(bits)) * alpha
+            pixels[at * 4 + 3] = alpha
+
+## One worker's cells `first..<last` of `cells`.
+struct UnpackShare:
+    var cells: Unpack[]
+    var first: usize
+    var last: usize
+
+func unpack_entry(context: void*?, index: usize):
+    let cells = (Unpack*)(context else return)
+    let cell = cells[index]
+    unpack_cell(cell.bytes, cell.columns, cell.pixels, cell.halves, cell.encoded)
+
+## Every cell of `cells` unpacked on the worker pool, at most 16 threads.
+func unpack_all(cells: Unpack[]) -> !:
+    if cells.length > 0:
+        pool.run(cells.length, unpack_entry, (void*)&cells[0], limit = 16)

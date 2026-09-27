@@ -1,0 +1,212 @@
+## What the main thread and a warp stroke's worker share: the recorded path
+## the worker still has to walk, whether the stroke has ended or is being
+## abandoned, and the cells the worker changed since the main thread last
+## uploaded them. Everything here is behind one lock.
+##
+## The main thread records points (`record`), ends the path (`end`) and, once
+## a frame, takes the changed cells (`take_dirty`) and hands over the cells it
+## read in (under `lock`, then `wake`); the worker takes points (`next`), waits
+## for the cells a segment needs (`sleep`), and reports what each dab changed
+## (`mark_dirty`) and how long its dabs took (`count_dab`).
+import memory
+import sync
+
+pub struct WarpQueue:
+    var mutex: sync.Mutex
+    ## Signalled when a point arrives or the path ends (the worker waits on it)
+    ## and when the worker is done (the main thread waits on it).
+    var changed: sync.Condition
+    ## The points still to walk, x and y after each other, oldest at `head`.
+    var points: f64[]
+    var head: usize
+    var count: usize
+    ## No more points will come.
+    var ended: bool
+    ## Stop at once, walking nothing more (the document is closing).
+    var stopping: bool
+    ## The worker has returned.
+    var done: bool
+    ## A dab failed; the stroke is ended there.
+    var failed: bool
+    ## The cells changed since the last `take_dirty`; right < left when none.
+    var dirty_left: i64
+    var dirty_top: i64
+    var dirty_right: i64
+    var dirty_bottom: i64
+    ## The worker's dabs since the last `take_dabs`, and their time in nanoseconds.
+    var dabs: u64
+    var dab_ns: u64
+    ## Time the worker spent waiting for cells to be read in, in nanoseconds.
+    var starved_ns: u64
+
+    ## An empty queue, on the heap so its address holds while the worker runs.
+    pub static func create() -> WarpQueue*!:
+        let points = try alloc f64[64] in memory.heap
+        errdefer free(points) in memory.heap
+        var mutex: sync.Mutex
+        var changed: sync.Condition
+        return try new WarpQueue(mutex = mutex, changed = changed, points = points, head = 0, count = 0, ended = false, stopping = false,
+                                 done = false, failed = false, dirty_left = 1, dirty_top = 1, dirty_right = 0, dirty_bottom = 0,
+                                 dabs = 0, dab_ns = 0, starved_ns = 0) in memory.heap
+
+    ## Free a queue whose worker has returned.
+    pub static func destroy(queue: WarpQueue*):
+        free(queue.points) in memory.heap
+        free(queue) in memory.heap
+
+    # -- The main thread.
+
+    ## Add (`x`, `y`) to the path.
+    pub mutating func record(x: f64, y: f64) -> !:
+        self.mutex.lock()
+        defer self.mutex.unlock()
+        if (self.count + 1) * 2 > self.points.length:
+            # Grow, keeping the order from the head.
+            let grown = try alloc f64[self.points.length * 2] in memory.heap
+            for index in 0..<self.count * 2:
+                grown[index] = self.points[(self.head * 2 + index) % self.points.length]
+            free(self.points) in memory.heap
+            self.points = grown
+            self.head = 0
+        let at = ((self.head + self.count) * 2) % self.points.length
+        self.points[at] = x
+        self.points[at + 1] = y
+        self.count += 1
+        self.changed.broadcast()
+
+    ## No more points: the worker walks what is left and returns.
+    pub mutating func end():
+        self.mutex.lock()
+        self.ended = true
+        self.changed.broadcast()
+        self.mutex.unlock()
+
+    ## Walk nothing more: the worker returns after the dab under way.
+    pub mutating func stop():
+        self.mutex.lock()
+        self.stopping = true
+        self.changed.broadcast()
+        self.mutex.unlock()
+
+    ## Whether the worker has returned.
+    pub mutating func finished() -> bool:
+        self.mutex.lock()
+        let done = self.done
+        self.mutex.unlock()
+        return done
+
+    ## Block until the worker has returned.
+    pub mutating func wait():
+        self.mutex.lock()
+        while not self.done:
+            self.changed.wait(&self.mutex)
+        self.mutex.unlock()
+
+    ## Whether a dab failed.
+    pub mutating func failure() -> bool:
+        self.mutex.lock()
+        let failed = self.failed
+        self.mutex.unlock()
+        return failed
+
+    ## The cells changed since the last call, as first and last column and row
+    ## (right < left when none), forgetting them.
+    pub mutating func take_dirty() -> i64[4]:
+        self.mutex.lock()
+        let taken: i64[4] = [self.dirty_left, self.dirty_top, self.dirty_right, self.dirty_bottom]
+        self.dirty_left = 1
+        self.dirty_right = 0
+        self.mutex.unlock()
+        return taken
+
+    ## The points recorded and not yet walked to.
+    pub mutating func depth() -> usize:
+        self.mutex.lock()
+        let count = self.count
+        self.mutex.unlock()
+        return count
+
+    ## The worker's dabs, their nanoseconds and its nanoseconds waiting for cells
+    ## since the last call, forgetting them.
+    pub mutating func take_dabs() -> u64[3]:
+        self.mutex.lock()
+        let taken: u64[3] = [self.dabs, self.dab_ns, self.starved_ns]
+        self.dabs = 0
+        self.dab_ns = 0
+        self.starved_ns = 0
+        self.mutex.unlock()
+        return taken
+
+    # -- Either side: the working copy's cells are handed over under the lock.
+
+    ## Take the lock; the main thread installs read cells while holding it.
+    pub mutating func lock():
+        self.mutex.lock()
+
+    pub mutating func unlock():
+        self.mutex.unlock()
+
+    ## With the lock held: wake the worker, which may be waiting for cells.
+    pub mutating func wake():
+        self.changed.broadcast()
+
+    ## With the lock held: sleep until woken (the lock is let go meanwhile);
+    ## false when the stroke is stopping and the worker should give up.
+    pub mutating func sleep() -> bool:
+        if self.stopping:
+            return false
+        self.changed.wait(&self.mutex)
+        return not self.stopping
+
+    # -- The worker.
+
+    ## One dab took `nanoseconds`.
+    pub mutating func count_dab(nanoseconds: u64):
+        self.mutex.lock()
+        self.dabs += 1
+        self.dab_ns += nanoseconds
+        self.mutex.unlock()
+
+    ## The worker waited `nanoseconds` for cells.
+    pub mutating func count_starved(nanoseconds: u64):
+        self.mutex.lock()
+        self.starved_ns += nanoseconds
+        self.mutex.unlock()
+
+    ## The next point to walk to, waiting for one; none once the path has ended
+    ## and is walked, or the stroke is stopping.
+    pub mutating func next() -> f64[2]?:
+        self.mutex.lock()
+        defer self.mutex.unlock()
+        while self.count == 0 and not self.ended and not self.stopping:
+            self.changed.wait(&self.mutex)
+        if self.stopping or self.count == 0:
+            return none
+        let at = self.head * 2
+        let point: f64[2] = [self.points[at], self.points[at + 1]]
+        self.head = (self.head + 1) % (self.points.length // 2)
+        self.count -= 1
+        return point
+
+    ## Cells `first_column..last_column` by `first_row..last_row` changed.
+    pub mutating func mark_dirty(first_column: i64, first_row: i64, last_column: i64, last_row: i64):
+        self.mutex.lock()
+        if self.dirty_right < self.dirty_left:
+            self.dirty_left = first_column
+            self.dirty_top = first_row
+            self.dirty_right = last_column
+            self.dirty_bottom = last_row
+        else:
+            self.dirty_left = first_column if first_column < self.dirty_left else self.dirty_left
+            self.dirty_top = first_row if first_row < self.dirty_top else self.dirty_top
+            self.dirty_right = last_column if last_column > self.dirty_right else self.dirty_right
+            self.dirty_bottom = last_row if last_row > self.dirty_bottom else self.dirty_bottom
+        self.mutex.unlock()
+
+    ## The worker has returned, `failed` when a dab could not be made.
+    pub mutating func finish(failed: bool):
+        self.mutex.lock()
+        self.done = true
+        self.failed = failed
+        self.changed.broadcast()
+        self.mutex.unlock()

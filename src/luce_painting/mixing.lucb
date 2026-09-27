@@ -1,0 +1,92 @@
+#==============================================================================================
+#
+#   mixing - How an edit mixes colors
+#
+#   DESCRIPTION:
+#       Tiles hold linear light. A document that blends in sRGB (Photoshop's default for
+#       8- and 16-bit RGB; `Document.linear_blend` off) mixes the sRGB-encoded values
+#       wherever colors mix: its shaders encode what they mix and decode the result
+#       (luce-color's shaders/srgb.glsl), and its CPU paths do the same with what is here. With
+#       "Blend RGB Colors Using Gamma 1.0" on, colors mix in linear light as stored.
+#       A mask's values are gray levels (coverage) and mix as they are in either mode;
+#       a color painted into one lands as its encoded level, as in Photoshop.
+#
+#==============================================================================================
+
+import gpu
+import math
+import memory
+import transfer
+from half import from_half
+
+## How one edit mixes: its colors as sRGB-encoded values (`srgb`), and whether
+## it works on a mask.
+pub struct Mixing:
+    pub var srgb: bool
+    pub var mask: bool
+
+    ## The flag the mixing shaders take: 1 mixes encoded values.
+    pub func flag() -> f32:
+        return 1.0 if self.srgb else 0.0
+
+    ## `color` (linear light) as the edit's shader takes it: encoded wherever
+    ## values mix encoded, and on a mask, whose values are encoded levels.
+    pub func color(color: gpu.Color) -> gpu.Color:
+        if not self.srgb and not self.mask:
+            return color
+        return encode_color(color)
+
+## `color`'s red, green and blue sRGB-encoded; alpha kept.
+pub func encode_color(color: gpu.Color) -> gpu.Color:
+    return gpu.Color(transfer.srgb_encode(color.red), transfer.srgb_encode(color.green), transfer.srgb_encode(color.blue), color.alpha)
+
+## Tables for CPU paths that mix a tile's colors as encoded values texel by
+## texel (smudge): every half float's encoded value, and luce-color's
+## interpolated decoding back to linear light, so neither costs a power per
+## sample.
+pub struct EncodingTables:
+    ## Indexed by a half float's bits.
+    pub var encoded: f32[]
+    var decoding: transfer.SrgbTable
+
+    pub static func create() -> EncodingTables!:
+        let encoded = try alloc f32[65536] in memory.heap
+        errdefer free(encoded) in memory.heap
+        for bits in 0..<(usize)65536:
+            let value = (f64)from_half((u16)bits)
+            # NaN and infinities stay as they are; the curve is for numbers.
+            encoded[bits] = (f32)transfer.srgb_encode(value) if math.is_finite(value) else (f32)value
+        return EncodingTables(encoded = encoded, decoding = try transfer.SrgbTable.create())
+
+    ## The encoded value of the half float `bits`.
+    pub func encode(bits: u16) -> f32:
+        return self.encoded[(usize)bits]
+
+    ## Linear light of encoded `value`; past 0..1 from the curve itself.
+    pub func decode(value: f32) -> f32:
+        return self.decoding.decode(value)
+
+    pub mutating func destroy():
+        if self.encoded.length > 0:
+            free(self.encoded) in memory.heap
+        self.decoding.destroy()
+        var nothing: f32[]
+        self.encoded = nothing
+
+test "the tables encode and decode as the curve does":
+    var tables = try EncodingTables.create()
+    defer tables.destroy()
+    # 0.5 in linear light is 0.7354 encoded; 0.5 encoded is 0.2140 in linear light.
+    assert(math.abs((f64)tables.encode(0x3800) - 0.735357) < 1e-5)
+    assert(math.abs((f64)tables.decode(0.5) - 0.214041) < 1e-6)
+    var step: usize = 0
+    while step <= 1000:
+        let value = (f64)step / 1000.0
+        assert(math.abs((f64)tables.decode((f32)value) - transfer.srgb_decode(value)) < 1e-6)
+        step += 1
+    assert(math.abs((f64)tables.decode(1.5) - transfer.srgb_decode(1.5)) < 1e-6)
+    let mixing = Mixing(srgb = true, mask = false)
+    let color = mixing.color(gpu.Color(0.5, 0.0, 1.0, 0.25))
+    assert(math.abs(color.red - 0.735357) < 1e-5 and color.green == 0.0 and math.abs(color.blue - 1.0) < 1e-9 and color.alpha == 0.25)
+    assert(Mixing(srgb = false, mask = false).color(gpu.Color(0.5, 0.5, 0.5)).red == 0.5)
+    assert(math.abs(Mixing(srgb = false, mask = true).color(gpu.Color(0.5, 0.5, 0.5)).red - 0.735357) < 1e-5)

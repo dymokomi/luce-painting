@@ -1,0 +1,243 @@
+## Spot healing, as Compositor's (Rendering/HealPixels.c): the painted hole is
+## filled from one shifted copy of the picture near it — the shift whose ring
+## around the hole best matches the hole's own ring — with the difference
+## between the two rings spread smoothly across the hole (a Laplace membrane,
+## solved by over-relaxation), so the patch brings its texture and takes the
+## surrounding tone: Poisson cloning. When no shift fits, the hole is filled
+## with the ring's harmonic interpolation. On the CPU, once per stroke.
+import math
+import memory
+from raster_errors import invalid
+
+## Pixel roles in the work box.
+let outside: u8 = 0
+let ring: u8 = 1
+let hole: u8 = 2
+
+## The distances tried, in work-box sizes, and the directions.
+let angle_count: usize = 24
+
+## Heal `pixels` (premultiplied RGBA, 4 samples a pixel, `width` × `height`)
+## where `painted` is non-zero, in place. Returns false when nothing was
+## painted.
+pub func heal(pixels: f32[], width: usize, height: usize, painted: const u8[]) -> bool!:
+    if pixels.length != width * height * 4 or painted.length != width * height:
+        error(invalid, "healing needs RGBA pixels and one mask byte each")
+    # The hole's bounding box.
+    var left = width
+    var top = height
+    var right: usize = 0
+    var bottom: usize = 0
+    for y in 0..<height:
+        for x in 0..<width:
+            if painted[y * width + x] != 0:
+                left = left if left < x else x
+                top = top if top < y else y
+                right = right if right > x + 1 else x + 1
+                bottom = bottom if bottom > y + 1 else y + 1
+    if right <= left:
+        return false
+    let size = (right - left) if right - left > bottom - top else (bottom - top)
+    let band = clamp_usize(size // 8, 2, 16)
+    # The work box: the hole and its ring, inside the picture.
+    let box_left = left - (band if left >= band else left)
+    let box_top = top - (band if top >= band else top)
+    let box_right = min_usize(width, right + band)
+    let box_bottom = min_usize(height, bottom + band)
+    let box_width = box_right - box_left
+    let box_height = box_bottom - box_top
+    let roles = try alloc u8[box_width * box_height] in memory.heap
+    defer free(roles) in memory.heap
+    try mark_roles(roles, painted, width, box_left, box_top, box_width, box_height, band)
+    # The best shift of the ring onto itself, then refined.
+    var best_x: i64 = 0
+    var best_y: i64 = 0
+    var best_score = 1.0e30
+    var found = false
+    let span = (f64)(box_width if box_width > box_height else box_height)
+    let factors: f64[5] = [1.05, 1.35, 1.75, 2.25, 2.8]
+    for factor in factors:
+        for step in 0..<angle_count:
+            let angle = (f64)step * 2.0 * math.pi / (f64)angle_count
+            let dx = (i64)math.round(math.cos(angle) * span * factor)
+            let dy = (i64)math.round(math.sin(angle) * span * factor)
+            let score = shift_score(pixels, width, height, roles, box_left, box_top, box_width, box_height, dx, dy) * (1.0 + 0.1 * factor)
+            if score < best_score:
+                best_score = score
+                best_x = dx
+                best_y = dy
+                found = true
+    if found:
+        let center_x = best_x
+        let center_y = best_y
+        for ry in -3..<(i64)4:
+            for rx in -3..<(i64)4:
+                let score = shift_score(pixels, width, height, roles, box_left, box_top, box_width, box_height, center_x + rx, center_y + ry) * (1.0 + 0.1 * 1.05)
+                if score < best_score:
+                    best_score = score
+                    best_x = center_x + rx
+                    best_y = center_y + ry
+    # The membrane: on the ring, target minus source; solved over the hole.
+    let values = try alloc f32[box_width * box_height * 4] in memory.heap
+    defer free(values) in memory.heap
+    var sum: f64[4] = [0.0, 0.0, 0.0, 0.0]
+    var ring_count = 0.0
+    for y in 0..<box_height:
+        for x in 0..<box_width:
+            let at = y * box_width + x
+            if roles[at] != ring:
+                continue
+            let target = ((box_top + y) * width + box_left + x) * 4
+            for channel in 0..<(usize)4:
+                let source = sample(pixels, width, height, (i64)(box_left + x) + best_x, (i64)(box_top + y) + best_y, channel) if found else 0.0
+                let value = (f64)pixels[target + channel] - source
+                values[at * 4 + channel] = (f32)value
+                sum[channel] += value
+            ring_count += 1.0
+    for y in 0..<box_height:
+        for x in 0..<box_width:
+            let at = y * box_width + x
+            if roles[at] == hole:
+                for channel in 0..<(usize)4:
+                    values[at * 4 + channel] = (f32)(sum[channel] / math.max(ring_count, 1.0))
+    solve(values, roles, box_width, box_height)
+    # Healed: the shifted source plus the membrane.
+    for y in 0..<box_height:
+        for x in 0..<box_width:
+            let at = y * box_width + x
+            if roles[at] != hole:
+                continue
+            let target = ((box_top + y) * width + box_left + x) * 4
+            var alpha = 0.0
+            for channel in 0..<(usize)4:
+                let source = sample(pixels, width, height, (i64)(box_left + x) + best_x, (i64)(box_top + y) + best_y, channel) if found else 0.0
+                let value = math.clamp(source + (f64)values[at * 4 + channel], 0.0, 1.0)
+                pixels[target + channel] = (f32)value
+                if channel == 3:
+                    alpha = value
+            # Premultiplied: no channel above the alpha.
+            for channel in 0..<(usize)3:
+                pixels[target + channel] = (f32)math.min((f64)pixels[target + channel], alpha)
+    return true
+
+## Mark each pixel of the work box: in the hole, in the ring around it (a
+## square dilation `band` wide, by prefix sums), or outside both.
+func mark_roles(roles: u8[], painted: const u8[], width: usize, left: usize, top: usize, box_width: usize, box_height: usize, band: usize) -> !:
+    let stride = box_width + 1
+    let sums = try alloc u32[stride * (box_height + 1)] in memory.heap
+    defer free(sums) in memory.heap
+    for index in 0..<sums.length:
+        sums[index] = 0
+    for y in 0..<box_height:
+        for x in 0..<box_width:
+            let inside: u32 = 1 if painted[(top + y) * width + left + x] != 0 else 0
+            sums[(y + 1) * stride + x + 1] = inside + sums[y * stride + x + 1] + sums[(y + 1) * stride + x] - sums[y * stride + x]
+    for y in 0..<box_height:
+        for x in 0..<box_width:
+            let at = y * box_width + x
+            if painted[(top + y) * width + left + x] != 0:
+                roles[at] = hole
+                continue
+            let x0 = x - (band if x >= band else x)
+            let y0 = y - (band if y >= band else y)
+            let x1 = min_usize(box_width, x + band + 1)
+            let y1 = min_usize(box_height, y + band + 1)
+            # Added before subtracting: the partial sums are unsigned.
+            let near = (sums[y1 * stride + x1] + sums[y0 * stride + x0]) - (sums[y0 * stride + x1] + sums[y1 * stride + x0])
+            roles[at] = ring if near > 0 else outside
+
+## How badly the ring shifted by (`dx`, `dy`) matches the ring in place: the
+## mean squared difference; unusable shifts (off the picture, or landing on
+## the hole) score as large.
+func shift_score(pixels: const f32[], width: usize, height: usize, roles: const u8[], left: usize, top: usize, box_width: usize, box_height: usize, dx: i64, dy: i64) -> f64:
+    let x0 = (i64)left + dx
+    let y0 = (i64)top + dy
+    if x0 < 0 or y0 < 0 or x0 + (i64)box_width > (i64)width or y0 + (i64)box_height > (i64)height:
+        return 1.0e30
+    # The shifted box must not cover the hole's box.
+    if math.iabs(dx) < (i64)box_width and math.iabs(dy) < (i64)box_height:
+        return 1.0e30
+    var total = 0.0
+    var count = 0.0
+    for y in 0..<box_height:
+        for x in 0..<box_width:
+            if roles[y * box_width + x] != ring:
+                continue
+            let here = ((top + y) * width + left + x) * 4
+            let there = ((usize)(y0 + (i64)y) * width + (usize)(x0 + (i64)x)) * 4
+            for channel in 0..<(usize)4:
+                let difference = (f64)pixels[here + channel] - (f64)pixels[there + channel]
+                total += difference * difference
+            count += 1.0
+    return total / math.max(count, 1.0)
+
+func sample(pixels: const f32[], width: usize, height: usize, x: i64, y: i64, channel: usize) -> f64:
+    if x < 0 or y < 0 or x >= (i64)width or y >= (i64)height:
+        return 0.0
+    return (f64)pixels[((usize)y * width + (usize)x) * 4 + channel]
+
+## Laplace's equation over the hole by successive over-relaxation (ω 1.8),
+## the ring's values held: each hole value moves toward its four neighbours'
+## mean.
+func solve(values: f32[], roles: const u8[], width: usize, height: usize):
+    for _ in 0..<(usize)300:
+        for y in 0..<height:
+            for x in 0..<width:
+                let at = y * width + x
+                if roles[at] != hole:
+                    continue
+                for channel in 0..<(usize)4:
+                    var total = 0.0
+                    var count = 0.0
+                    if x > 0:
+                        total += (f64)values[(at - 1) * 4 + channel]
+                        count += 1.0
+                    if x + 1 < width:
+                        total += (f64)values[(at + 1) * 4 + channel]
+                        count += 1.0
+                    if y > 0:
+                        total += (f64)values[(at - width) * 4 + channel]
+                        count += 1.0
+                    if y + 1 < height:
+                        total += (f64)values[(at + width) * 4 + channel]
+                        count += 1.0
+                    let current = (f64)values[at * 4 + channel]
+                    values[at * 4 + channel] = (f32)(current + 1.8 * (total / math.max(count, 1.0) - current))
+
+func min_usize(a: usize, b: usize) -> usize:
+    return a if a < b else b
+
+func clamp_usize(value: usize, low: usize, high: usize) -> usize:
+    return low if value < low else (high if value > high else value)
+
+test "a spot on a gradient heals to the gradient, texture from beside it":
+    let width: usize = 96
+    let height: usize = 64
+    let pixels = try alloc f32[width * height * 4] in memory.heap
+    defer free(pixels) in memory.heap
+    let painted = try alloc u8[width * height] in memory.heap
+    defer free(painted) in memory.heap
+    # A horizontal gray ramp, opaque, with a black blotch in the middle painted over.
+    for y in 0..<height:
+        for x in 0..<width:
+            let at = (y * width + x) * 4
+            let gray = (f32)x / (f32)width
+            pixels[at] = gray
+            pixels[at + 1] = gray
+            pixels[at + 2] = gray
+            pixels[at + 3] = 1.0
+            let blotch = x >= 44 and x < 52 and y >= 28 and y < 36
+            painted[y * width + x] = 1 if blotch else 0
+            if blotch:
+                pixels[at] = 0.0
+                pixels[at + 1] = 0.0
+                pixels[at + 2] = 0.0
+    assert(try heal(pixels, width, height, painted))
+    # Healed, the middle is the ramp's gray there again, give or take.
+    let middle = (32 * width + 48) * 4
+    assert(math.abs((f64)pixels[middle] - 48.0 / 96.0) < 0.03 and pixels[middle + 3] > 0.99)
+    # Nothing outside the hole moved.
+    assert(math.abs((f64)pixels[(5 * width + 5) * 4] - 5.0 / 96.0) < 0.0001)
+    for index in 0..<painted.length:
+        painted[index] = 0
+    assert(not (try heal(pixels, width, height, painted)))

@@ -1,0 +1,245 @@
+## The brush engine's dynamics, sampled tips and textures, painted on the GPU
+## and read back: what a pen sample, a tip image or a texture does to the dabs.
+import gpu
+import memory
+import math
+from tiles import Tiles
+from luce_painting.mixing import Mixing
+from luce_painting.paint import Brush, Painter
+from luce_painting.stroke import Stroke, PaintTarget
+from luce_painting.brush_images import BrushImages, texture_image
+from luce_painting.dynamics import Dynamic, Control, Pen, dynamic_size, dynamic_angle, dynamic_flow, dynamic_opacity
+
+## A 128 × 128 layer's tiles, mixing as a document does by default (sRGB
+## encoded), its painter, and pixels to read into.
+struct Bench:
+    var device: gpu.Device
+    var tiles: Tiles
+    var painter: Painter
+    var pixels: f32[]
+
+    static func open() -> Bench?!:
+        var device = gpu.Device.open() catch failure:
+            assert(failure.code == gpu.unavailable)
+            return none
+        errdefer device.destroy()
+        var tiles = try Tiles.create(device, 128, 128)
+        errdefer tiles.destroy()
+        var painter = try Painter.create(device)
+        errdefer painter.destroy()
+        let pixels = try alloc f32[(usize)128 * 128 * 4] in memory.heap
+        return Bench(device = device, tiles = tiles, painter = painter, pixels = pixels)
+
+    ## What a stroke paints: the tiles, nothing selected, colors mixed encoded.
+    mutating func target() -> PaintTarget:
+        return PaintTarget(tiles = &self.tiles, mixing = Mixing(srgb = true, mask = false))
+
+    ## One dab of `brush` at (`x`, `y`) with `pen`, through `images`, then the pixels.
+    mutating func dab(brush: Brush, x: f64, y: f64, pen: Pen = Pen(), images: BrushImages*? = none) -> !:
+        var stroke = try Stroke.begin(&self.painter, self.target(), brush, x, y, pen = pen, images = images)
+        stroke.finish()
+        try self.read()
+
+    mutating func read() -> !:
+        try self.tiles.read(self.pixels)
+
+    ## The alpha at (`x`, `y`).
+    func alpha(x: usize, y: usize) -> f32:
+        return self.pixels[(y * 128 + x) * 4 + 3]
+
+    ## How many pixels are painted over half.
+    func painted() -> usize:
+        var count: usize = 0
+        for index in 0..<(usize)128 * 128:
+            if self.pixels[index * 4 + 3] > 0.5:
+                count += 1
+        return count
+
+    mutating func close():
+        free(self.pixels) in memory.heap
+        self.painter.destroy()
+        self.tiles.destroy()
+        self.device.destroy()
+
+test "pen pressure through the size dynamic shrinks the dab from its minimum up":
+    var bench = (try Bench.open()) else return
+    defer bench.close()
+    var brush = Brush(diameter = 40.0, hardness = 1.0, color = gpu.Color(0.0, 0.0, 0.0, 1.0))
+    brush.dynamics[dynamic_size] = Dynamic(control = Control.pressure, minimum = 0.0)
+    try bench.dab(brush, 64.0, 64.0, pen = Pen(pressure = 0.5))
+    # A 20 pixel dab: 19 pixels right of centre is outside, 8 inside.
+    assert(bench.alpha(72, 64) > 0.99 and bench.alpha(83, 64) == 0.0)
+    let half = bench.painted()
+    assert(half > 250 and half < 380)
+
+test "a mouse's pressure paints the full size, and off leaves the size alone":
+    var bench = (try Bench.open()) else return
+    defer bench.close()
+    var brush = Brush(diameter = 40.0, hardness = 1.0)
+    brush.dynamics[dynamic_size] = Dynamic(control = Control.pressure, minimum = 0.0)
+    try bench.dab(brush, 64.0, 64.0)
+    assert(bench.alpha(82, 64) > 0.99)
+
+test "a pen touching at zero pressure paints its minimum, not a full dab":
+    var bench = (try Bench.open()) else return
+    defer bench.close()
+    var brush = Brush(diameter = 40.0, hardness = 1.0)
+    brush.dynamics[dynamic_size] = Dynamic(control = Control.pressure, minimum = 0.25)
+    try bench.dab(brush, 64.0, 64.0, pen = Pen(pressure = 0.0))
+    # A 10 pixel dab: 4 pixels out is inside, 8 is outside.
+    assert(bench.alpha(68, 64) > 0.99 and bench.alpha(72, 64) == 0.0)
+
+test "the angle follows the pen's azimuth":
+    var bench = (try Bench.open()) else return
+    defer bench.close()
+    # A flat ellipse, long along its angle: turned by the azimuth to stand upright.
+    var brush = Brush(diameter = 60.0, hardness = 1.0, roundness = 0.2)
+    brush.dynamics[dynamic_angle] = Dynamic(control = Control.azimuth)
+    try bench.dab(brush, 64.0, 64.0, pen = Pen(azimuth = 90.0, altitude = 45.0))
+    assert(bench.alpha(64, 90) > 0.99 and bench.alpha(64, 38) > 0.99)
+    assert(bench.alpha(90, 64) == 0.0 and bench.alpha(38, 64) == 0.0)
+
+test "flow follows the airbrush wheel":
+    var bench = (try Bench.open()) else return
+    defer bench.close()
+    var brush = Brush(diameter = 30.0, hardness = 1.0)
+    brush.dynamics[dynamic_flow] = Dynamic(control = Control.wheel)
+    try bench.dab(brush, 64.0, 64.0, pen = Pen(tangential = 0.25))
+    let alpha = bench.alpha(64, 64)
+    assert(alpha > 0.2 and alpha < 0.3)
+
+test "a sampled tip paints its image, turned and fitted to the dab":
+    var bench = (try Bench.open()) else return
+    defer bench.close()
+    var images = BrushImages()
+    defer images.destroy()
+    # The tip's left half paints, its right half does not.
+    let tip = try alloc u8[(usize)64 * 64] in memory.heap
+    defer free(tip) in memory.heap
+    for y in 0..<64:
+        for x in 0..<64:
+            tip[y * 64 + x] = 255 if x < 32 else 0
+    try images.set_tip(tip, 64, 64)
+    let brush = Brush(diameter = 60.0, hardness = 1.0)
+    try bench.dab(brush, 64.0, 64.0, images = &images)
+    assert(bench.alpha(50, 64) > 0.99 and bench.alpha(78, 64) == 0.0)
+    # The image is square: its corners paint too, unlike a round tip.
+    assert(bench.alpha(37, 37) > 0.99)
+    # Turned a quarter clockwise, the painted half is on top.
+    var turned = brush
+    turned.angle = 90.0
+    var second = (try Bench.open()) else return
+    defer second.close()
+    # Textures belong to one device: the second bench's brush images are its own.
+    var own = BrushImages()
+    defer own.destroy()
+    try own.set_tip(tip, 64, 64)
+    try second.dab(turned, 64.0, 64.0, images = &own)
+    assert(second.alpha(64, 50) > 0.99 and second.alpha(64, 78) == 0.0)
+
+test "a texture image multiplies into each dab by its depth, tiled in document space":
+    var bench = (try Bench.open()) else return
+    defer bench.close()
+    var images = BrushImages()
+    defer images.destroy()
+    # Stripes four pixels wide: painting, then not.
+    let stripes = try alloc u8[(usize)8 * 8] in memory.heap
+    defer free(stripes) in memory.heap
+    for y in 0..<8:
+        for x in 0..<8:
+            stripes[y * 8 + x] = 255 if x < 4 else 0
+    try images.set_pattern(stripes, 8, 8)
+    let brush = Brush(diameter = 80.0, hardness = 1.0, texture = texture_image, texture_depth = 1.0)
+    try bench.dab(brush, 64.0, 64.0, images = &images)
+    # Pixels 65 and 66 fall in a painting stripe (64..68), 69 and 70 in a bare one.
+    assert(bench.alpha(65, 64) > 0.99 and bench.alpha(70, 64) < 0.01)
+    # The same stripes repeat 8 pixels on.
+    assert(bench.alpha(73, 64) > 0.99 and bench.alpha(78, 64) < 0.01)
+    # Half the depth leaves half in the bare stripes.
+    var second = (try Bench.open()) else return
+    defer second.close()
+    var shallow = brush
+    shallow.texture_depth = 0.5
+    var own = BrushImages()
+    defer own.destroy()
+    try own.set_pattern(stripes, 8, 8)
+    try second.dab(shallow, 64.0, 64.0, images = &own)
+    assert(second.alpha(70, 64) > 0.45 and second.alpha(70, 64) < 0.55 and second.alpha(65, 64) > 0.99)
+
+test "a stroke's pressure eases from one point to the next":
+    var bench = (try Bench.open()) else return
+    defer bench.close()
+    var brush = Brush(diameter = 30.0, hardness = 1.0, spacing = 0.1)
+    brush.dynamics[dynamic_size] = Dynamic(control = Control.pressure, minimum = 0.0)
+    var stroke = try Stroke.begin(&bench.painter, bench.target(), brush, 20.0, 64.0, pen = Pen(pressure = 0.2))
+    try stroke.extend(&bench.painter, bench.target(), 108.0, 64.0, pen = Pen(pressure = 1.0))
+    try stroke.flush(&bench.painter, bench.target())
+    stroke.finish()
+    try bench.read()
+    # Thin at the start, thick at the end.
+    var start_rows = 0
+    var end_rows = 0
+    for y in 0..<128:
+        if bench.alpha(30, (usize)y) > 0.5:
+            start_rows += 1
+        if bench.alpha(100, (usize)y) > 0.5:
+            end_rows += 1
+    assert(start_rows > 0 and end_rows > start_rows * 2)
+
+## The highest alpha along row `y`.
+func row_peak(bench: Bench, y: usize) -> f32:
+    var peak: f32 = 0.0
+    for x in 0..<(usize)128:
+        let alpha = bench.alpha(x, y)
+        peak = alpha if alpha > peak else peak
+    return peak
+
+## Stroke back and forth along row 64 `passes` times, each point a flush.
+func scrub(bench: Bench*, brush: Brush, passes: i64, pen: Pen = Pen()) -> !:
+    var stroke = try Stroke.begin(&bench.painter, bench.target(), brush, 20.0, 64.0, pen = pen)
+    for pass in 0..<passes:
+        for step in 0..<(i64)22:
+            let x = 20.0 + (f64)step * 4.0 if pass % 2 == 0 else 104.0 - (f64)step * 4.0
+            try stroke.extend(&bench.painter, bench.target(), x, 64.0, pen = pen)
+            try stroke.flush(&bench.painter, bench.target())
+    stroke.finish()
+    try bench.read()
+
+test "opacity is the stroke's ceiling: overlapping dabs never pass it, while flow builds up beneath":
+    var bench = (try Bench.open()) else return
+    defer bench.close()
+    let brush = Brush(diameter = 24.0, hardness = 1.0, opacity = 0.5, flow = 1.0, spacing = 0.1)
+    try scrub(&bench, brush, 6)
+    let peak = row_peak(bench, 64)
+    assert(peak > 0.49 and peak < 0.51)
+    # Low flow: one dab leaves a little, many build up to the ceiling, never past it.
+    var light = (try Bench.open()) else return
+    defer light.close()
+    let thin = Brush(diameter = 24.0, hardness = 1.0, opacity = 0.5, flow = 0.05, spacing = 0.5)
+    var once = try Stroke.begin(&light.painter, light.target(), thin, 64.0, 64.0)
+    once.finish()
+    try light.read()
+    let first = light.alpha(64, 64)
+    assert(first > 0.01 and first < 0.05)
+    try scrub(&light, thin, 20)
+    let built = light.alpha(64, 64)
+    assert(built > first * 3.0 and built <= 0.505)
+
+test "opacity driven per dab is each dab's ceiling, however many overlap":
+    var bench = (try Bench.open()) else return
+    defer bench.close()
+    var brush = Brush(diameter = 24.0, hardness = 1.0, opacity = 1.0, flow = 1.0, spacing = 0.1)
+    brush.dynamics[dynamic_opacity] = Dynamic(control = Control.pressure)
+    try scrub(&bench, brush, 6, pen = Pen(pressure = 0.4))
+    let peak = row_peak(bench, 64)
+    assert(peak > 0.39 and peak < 0.41)
+    # A harder press raises the ceiling; flow below 1 approaches it.
+    var second = (try Bench.open()) else return
+    defer second.close()
+    var soft = brush
+    soft.flow = 0.3
+    try scrub(&second, soft, 1, pen = Pen(pressure = 0.8))
+    let reached = second.alpha(64, 64)
+    assert(reached > 0.5 and reached <= 0.805)
+    # The color stays the brush's where it is capped.
+    assert(second.pixels[(64 * 128 + 64) * 4] < 0.01)

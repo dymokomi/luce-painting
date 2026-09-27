@@ -1,0 +1,174 @@
+#==============================================================================================
+#
+#   paint - What a stroke paints with
+#
+#   DESCRIPTION:
+#       Photoshop's brush settings (Brush), and the shader pipelines a device needs to paint
+#       (Painter): the dab and paint passes strokes use (stroke.lucb), and the gradient pass
+#       that lays one cell of a gradient fill.
+#
+#==============================================================================================
+
+import gpu
+import math
+from tiles import tile_size
+from luce_painting.mixing import Mixing
+from luce_painting.dynamics import Dynamic
+from luce_painting.shaders import dab_frag_words, dab_frag_msl, paint_frag_words, paint_frag_msl, gradient_frag_words, gradient_frag_msl
+from raster_errors import invalid
+
+pub struct Brush:
+    ## Tip diameter in document pixels, 1..4096.
+    pub var diameter: f64 = 32.0
+    ## 0..1: the fraction of the radius at full coverage before the falloff.
+    pub var hardness: f64 = 0.75
+    ## 0..1: caps the stroke's coverage.
+    pub var opacity: f64 = 1.0
+    ## 0..1: how much each dab adds where it lands.
+    pub var flow: f64 = 1.0
+    ## Straight-alpha paint color in linear light; alpha is ignored.
+    pub var color: gpu.Color = gpu.Color(0.0, 0.0, 0.0, 1.0)
+    ## Erase instead of paint.
+    pub var erase: bool
+    ## Hard, whole-pixel dabs with no anti-aliasing: the Pencil.
+    pub var aliased: bool
+    # -- Tip shape.
+    ## The distance between dabs as a fraction of the diameter, 0.01..5 (Photoshop's 25 %).
+    pub var spacing: f64 = 0.25
+    ## The tip's rotation in degrees.
+    pub var angle: f64 = 0.0
+    ## The tip's minor axis over its major, 0.05..1.
+    pub var roundness: f64 = 1.0
+    ## The string the brush trails the pointer on, in document pixels; 0 follows exactly.
+    pub var smoothing: f64 = 0.0
+    # -- Shape dynamics, each 0..1: the fraction of the range a dab may vary by.
+    pub var size_jitter: f64 = 0.0
+    pub var angle_jitter: f64 = 0.0
+    pub var roundness_jitter: f64 = 0.0
+    ## What drives each parameter, by the indices in dynamics.lucb (size,
+    ## flow, opacity, angle, roundness, scatter, texture depth, hue,
+    ## saturation, brightness); all off by default.
+    pub var dynamics: Dynamic[10]
+    # -- Scattering: how far a dab may stray, as a fraction of the diameter (0..10), and how many land per step (1..16).
+    pub var scatter: f64 = 0.0
+    pub var scatter_count: i64 = 1
+    # -- Transfer and color dynamics, each 0..1.
+    pub var flow_jitter: f64 = 0.0
+    pub var hue_jitter: f64 = 0.0
+    pub var saturation_jitter: f64 = 0.0
+    pub var brightness_jitter: f64 = 0.0
+    # -- Texture: 0 none, 1 grain, 2 canvas weave, 3 dots, 4 the brush's own
+    # image; its scale (0.1..10), depth (0..1), mode (0 multiply, 1 subtract)
+    # and whether its values are inverted.
+    pub var texture: i64 = 0
+    pub var texture_scale: f64 = 1.0
+    pub var texture_depth: f64 = 0.5
+    pub var texture_mode: i64 = 0
+    pub var texture_invert: bool
+
+    pub func check() -> !:
+        if not (self.diameter >= 1.0 and self.diameter <= 5000.0) or not (self.hardness >= 0.0 and self.hardness <= 1.0) or not (self.opacity >= 0.0 and self.opacity <= 1.0) or not (self.flow >= 0.0 and self.flow <= 1.0):
+            error(invalid, "brush diameter must be 1..5000 and hardness, opacity and flow 0..1")
+        if not (self.spacing >= 0.01 and self.spacing <= 5.0) or not math.is_finite(self.angle) or not (self.roundness >= 0.05 and self.roundness <= 1.0) or not (self.smoothing >= 0.0 and self.smoothing <= 4096.0):
+            error(invalid, "brush spacing must be 0.01..5, roundness 0.05..1, smoothing 0..4096 and the angle finite")
+        for fraction in [self.size_jitter, self.angle_jitter, self.roundness_jitter, self.flow_jitter, self.hue_jitter, self.saturation_jitter, self.brightness_jitter, self.texture_depth]:
+            if not (fraction >= 0.0 and fraction <= 1.0):
+                error(invalid, "brush jitters and texture depth must be 0..1")
+        if not (self.scatter >= 0.0 and self.scatter <= 10.0) or self.scatter_count < 1 or self.scatter_count > 16 or self.texture < 0 or self.texture > 4 or not (self.texture_scale >= 0.1 and self.texture_scale <= 10.0) or self.texture_mode < 0 or self.texture_mode > 1:
+            error(invalid, "brush scatter must be 0..10 with 1..16 dabs, texture 0..4 at scale 0.1..10 in mode 0..1")
+        for dynamic in self.dynamics:
+            try dynamic.check()
+
+## The shader pipelines a device needs to paint: dabs, the paint pass that
+## rebuilds a tile from its original and the coverage laid on it, and one
+## cell of a gradient.
+pub struct Painter:
+    var owner: gpu.Device
+    var dab_shader: gpu.Shader
+    var paint_shader: gpu.Shader
+    var dab: gpu.Pipeline
+    ## The same shader drawn with `replace`: capped dabs darken towards their opacity.
+    var capped_dab: gpu.Pipeline
+    var paint: gpu.Pipeline
+    var gradient_shader: gpu.Shader
+    var gradient: gpu.Pipeline
+    ## One white and one black texel: "everything selected" and "nothing
+    ## selected"; one clear texel: no effect image where a retouch has none.
+    pub var white: gpu.Texture
+    pub var black: gpu.Texture
+    pub var clear: gpu.Texture
+
+    pub static func create(device: gpu.Device) -> Painter!:
+        var dab_shader = try gpu.Shader.create(device, dab_frag_words, dab_frag_msl)
+        errdefer dab_shader.destroy()
+        var paint_shader = try gpu.Shader.create(device, paint_frag_words, paint_frag_msl)
+        errdefer paint_shader.destroy()
+        var dab = try gpu.Pipeline.create(device, dab_shader, gpu.Blend.over, gpu.Format.rgba16_float)
+        errdefer dab.destroy()
+        var capped_dab = try gpu.Pipeline.create(device, dab_shader, gpu.Blend.replace, gpu.Format.rgba16_float)
+        errdefer capped_dab.destroy()
+        var paint = try gpu.Pipeline.create(device, paint_shader, gpu.Blend.replace, gpu.Format.rgba16_float)
+        errdefer paint.destroy()
+        var gradient_shader = try gpu.Shader.create(device, gradient_frag_words, gradient_frag_msl)
+        errdefer gradient_shader.destroy()
+        var gradient = try gpu.Pipeline.create(device, gradient_shader, gpu.Blend.replace, gpu.Format.rgba16_float)
+        errdefer gradient.destroy()
+        var white = try gpu.Texture.create(device, 1, 1, gpu.Format.rgba8_linear)
+        errdefer white.destroy()
+        try white.upload([(u8)255, (u8)255, (u8)255, (u8)255])
+        var black = try gpu.Texture.create(device, 1, 1, gpu.Format.rgba8_linear)
+        errdefer black.destroy()
+        try black.upload([(u8)0, (u8)0, (u8)0, (u8)255])
+        var clear = try gpu.Texture.create(device, 1, 1, gpu.Format.rgba8_linear)
+        errdefer clear.destroy()
+        try clear.upload([(u8)0, (u8)0, (u8)0, (u8)0])
+        return Painter(owner = device, dab_shader = dab_shader, paint_shader = paint_shader, dab = dab, capped_dab = capped_dab, paint = paint, white = white, black = black, clear = clear,
+                       gradient_shader = gradient_shader, gradient = gradient)
+
+    ## The device the pipelines belong to.
+    pub func device() -> gpu.Device:
+        return self.owner
+
+    ## The dab pipeline: `over` for a stroke that builds up, `replace` for one
+    ## whose opacity caps it (capped dabs darken towards their opacity).
+    pub func dab_pipeline(capped: bool) -> gpu.Pipeline:
+        return self.capped_dab if capped else self.dab
+
+    ## paint.frag: a tile rebuilt from its original through a coverage (and
+    ## a selection), in a color or an effect. Fills use it too.
+    pub func paint_pipeline() -> gpu.Pipeline:
+        return self.paint
+
+    pub mutating func destroy():
+        self.clear.destroy()
+        self.black.destroy()
+        self.white.destroy()
+        self.paint.destroy()
+        self.gradient.destroy()
+        self.gradient_shader.destroy()
+        self.dab.destroy()
+        self.capped_dab.destroy()
+        self.paint_shader.destroy()
+        self.dab_shader.destroy()
+
+## Draw one cell of a gradient into `fresh`: `source` under it (what shows
+## where `clip`, a selection's coverage when `selected`, leaves it), the cell's
+## first texel at (`origin_x`, `origin_y`) and the ends in the same texels (a
+## coarser pyramid level passes them divided by its scale). The colors are in
+## linear light; they mix as `mixing` says, so the stops blend as sRGB-encoded
+## values where the document blends in sRGB, as Photoshop's do.
+pub func gradient_tile(painter: const Painter*, fresh: gpu.Texture*, source: gpu.Texture, clip: gpu.Texture, selected: bool, origin_x: f64, origin_y: f64,
+                       x0: f64, y0: f64, x1: f64, y1: f64, from_color: gpu.Color, to_color: gpu.Color, radial: bool, mixing: Mixing) -> !:
+    let first = mixing.color(from_color)
+    let last = mixing.color(to_color)
+    var params: f32[20] = [(f32)first.red, (f32)first.green, (f32)first.blue, (f32)first.alpha,
+                           (f32)last.red, (f32)last.green, (f32)last.blue, (f32)last.alpha,
+                           (f32)origin_x, (f32)origin_y, (f32)x0, (f32)y0, (f32)x1, (f32)y1, 1.0 if selected else 0.0, 1.0 if radial else 0.0,
+                           mixing.flag(), 0.0, 0.0, 0.0]
+    let frame = try fresh.frame()
+    defer frame.release()
+    let area = try frame.value().target()
+    defer area.release()
+    try gpu.shade(area.value(), painter.gradient, gpu.Rect(width = (f64)tile_size, height = (f64)tile_size), u8[]((u8*)&params[0], 80),
+                  [source, clip], gpu.Filter.nearest)
+    discard(try frame.value().present(gpu.Color(0.0, 0.0, 0.0, 0.0)))

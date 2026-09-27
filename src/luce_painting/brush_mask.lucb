@@ -1,0 +1,376 @@
+## A brush tip or texture being made: grayscale coverage (255 paints), drawn
+## on with a simple round brush, cleared, inverted, or taken from a picture's
+## RGBA pixels (dark and opaque paints, as Photoshop shows a brush). Its
+## `coverage` is what a stroke's brush images take (brush_images.lucb);
+## `preview` and `stroke_preview` are RGBA to show it. Opening one from a file
+## and keeping it as PNG is luce-image's (brush_files).
+import interop
+import math
+import memory
+from luce_painting.brush_images import brush_image_limit
+from raster_errors import invalid
+
+pub struct BrushMask:
+    var columns: usize
+    var rows: usize
+    var pixels: u8[]
+    ## The last `preview` or `stroke_preview`, RGBA, kept for the view Luce reads.
+    var shown: u8[]
+    var closed: bool
+
+    static func own(width: usize, height: usize) -> interop.Reference[BrushMask]!:
+        if width < 1 or height < 1 or width > brush_image_limit or height > brush_image_limit:
+            error(invalid, "a brush mask is 1..1024 pixels a side")
+        var reservation = try interop.Reservation[BrushMask](brush_mask_type)
+        errdefer reservation.cancel()
+        let pixels = try alloc u8[width * height] in memory.heap
+        errdefer free(pixels) in memory.heap
+        for index in 0..<pixels.length:
+            pixels[index] = 0
+        let native = try new BrushMask(columns = width, rows = height, pixels = pixels) in memory.heap
+        return reservation.publish(native, memory.heap)
+
+    ## An empty mask, `width` × `height` (1..1024 each): nothing paints.
+    pub static func create(width: i64 = 256, height: i64 = 256) -> interop.Reference[BrushMask]!:
+        if width < 1 or height < 1:
+            error(invalid, "a brush mask is 1..1024 pixels a side")
+        return try BrushMask.own((usize)width, (usize)height)
+
+    ## A mask of a picture's 8-bit RGBA pixels (`width` × `height`), dark
+    ## (and opaque) where it paints, at its size scaled down to fit 1024
+    ## pixels a side.
+    pub static func from_rgba8(rgba: const u8[], width: usize, height: usize) -> interop.Reference[BrushMask]!:
+        if width == 0 or height == 0:
+            error(invalid, "the image is empty")
+        let scale = math.min(1.0, (f64)brush_image_limit / (f64)(width if width > height else height))
+        let mask = try BrushMask.own((usize)math.max(1.0, math.round((f64)width * scale)), (usize)math.max(1.0, math.round((f64)height * scale)))
+        errdefer mask.release()
+        try mask.value().draw_rgba8(rgba, width, height)
+        return mask
+
+    ## A mask of its own with the same pixels.
+    pub func copy() -> interop.Reference[BrushMask]!:
+        try self.require_open()
+        let made = try BrushMask.own(self.columns, self.rows)
+        memory.copy(made.value().pixels, self.pixels, self.pixels.length)
+        return made
+
+    pub func width() -> i64!:
+        try self.require_open()
+        return (i64)self.columns
+
+    pub func height() -> i64!:
+        try self.require_open()
+        return (i64)self.rows
+
+    ## The coverage bytes, a byte a pixel, row by row.
+    pub func coverage() -> const u8[]!:
+        try self.require_open()
+        return self.pixels
+
+    ## Whether nothing paints anywhere.
+    pub func is_empty() -> bool!:
+        try self.require_open()
+        for value in self.pixels:
+            if value != 0:
+                return false
+        return true
+
+    ## Take a picture's 8-bit RGBA pixels in, fitted inside the mask with its
+    ## aspect kept and centred; what it does not cover paints nothing.
+    pub mutating func draw_rgba8(rgba: const u8[], width: usize, height: usize) -> !:
+        try self.require_open()
+        if width == 0 or height == 0 or rgba.length < width * height * 4:
+            error(invalid, "the picture's pixels do not fill its size")
+        let scale = math.min((f64)self.columns / (f64)width, (f64)self.rows / (f64)height)
+        let left = ((f64)self.columns - (f64)width * scale) * 0.5
+        let top = ((f64)self.rows - (f64)height * scale) * 0.5
+        for y in 0..<self.rows:
+            for x in 0..<self.columns:
+                # The source pixels under this one, averaged (a box when shrinking).
+                let x0 = ((f64)x - left) / scale
+                let y0 = ((f64)y - top) / scale
+                let x1 = ((f64)x + 1.0 - left) / scale
+                let y1 = ((f64)y + 1.0 - top) / scale
+                self.pixels[y * self.columns + x] = (u8)math.round(covered(rgba, width, height, x0, y0, x1, y1) * 255.0)
+
+    ## Paint a soft round dab at (`x`, `y`) mask pixels, `radius` across its
+    ## half, `hardness` 0..1, bringing the coverage towards `value` (0 erases,
+    ## 1 paints) by the dab's own.
+    pub mutating func dab(x: f64, y: f64, radius: f64, hardness: f64, value: f64) -> !:
+        try self.require_open()
+        if not math.is_finite(x) or not math.is_finite(y) or not (radius > 0.0) or radius > 4096.0:
+            error(invalid, "a dab needs a finite place and a radius 0..4096")
+        let target = math.clamp(value, 0.0, 1.0) * 255.0
+        let core = radius * math.clamp(hardness, 0.0, 1.0)
+        let reach = math.max(radius, core + 0.5)
+        let left = (i64)math.max(0.0, math.floor(x - reach))
+        let top = (i64)math.max(0.0, math.floor(y - reach))
+        let right = (i64)math.min((f64)self.columns - 1.0, math.ceil(x + reach))
+        let bottom = (i64)math.min((f64)self.rows - 1.0, math.ceil(y + reach))
+        var row = top
+        while row <= bottom:
+            var column = left
+            while column <= right:
+                let dx = (f64)column + 0.5 - x
+                let dy = (f64)row + 0.5 - y
+                let distance = math.sqrt(dx * dx + dy * dy)
+                let amount = 1.0 - smooth(core, reach, distance)
+                if amount > 0.0:
+                    let at = (usize)row * self.columns + (usize)column
+                    let now = (f64)self.pixels[at]
+                    self.pixels[at] = (u8)math.round(now + (target - now) * amount)
+                column += 1
+            row += 1
+
+    ## The round tip as the brush paints it, filling the mask: an ellipse of
+    ## `roundness` (minor over major axis) turned by `angle` degrees, with the
+    ## dab shader's hard core of `hardness` and soft edge. Shows a brush with no
+    ## sampled tip, and is where painting one starts from.
+    pub mutating func draw_round(hardness: f64, angle: f64, roundness: f64) -> !:
+        try self.require_open()
+        let radius = (f64)(self.columns if self.columns < self.rows else self.rows) * 0.5 - 1.0
+        let core = radius * math.clamp(hardness, 0.0, 1.0)
+        let edge = math.max(radius, core + 0.5)
+        let radians = (angle if math.is_finite(angle) else 0.0) * math.pi / 180.0
+        let cosine = math.cos(radians)
+        let sine = math.sin(radians)
+        let round = math.clamp(roundness, 0.05, 1.0)
+        for y in 0..<self.rows:
+            for x in 0..<self.columns:
+                let px = (f64)x + 0.5 - (f64)self.columns * 0.5
+                let py = (f64)y + 0.5 - (f64)self.rows * 0.5
+                let qx = px * cosine + py * sine
+                let qy = (-px * sine + py * cosine) / round
+                let cover = 1.0 - smooth(core, edge, math.sqrt(qx * qx + qy * qy))
+                self.pixels[y * self.columns + x] = (u8)math.round(cover * 255.0)
+
+    ## Dabs from (`x0`, `y0`) to (`x1`, `y1`), a quarter radius apart, the
+    ## first included: a drag's segment.
+    pub mutating func line(x0: f64, y0: f64, x1: f64, y1: f64, radius: f64, hardness: f64, value: f64) -> !:
+        let dx = x1 - x0
+        let dy = y1 - y0
+        let length = math.sqrt(dx * dx + dy * dy)
+        let step = math.max(0.5, radius * 0.25)
+        var along = 0.0
+        while along <= length:
+            let t = along / length if length > 0.0 else 0.0
+            try self.dab(x0 + dx * t, y0 + dy * t, radius, hardness, value)
+            along += step
+
+    ## Nothing paints (or, `value` 1, everything does).
+    pub mutating func clear(value: f64 = 0.0) -> !:
+        try self.require_open()
+        let byte = (u8)math.round(math.clamp(value, 0.0, 1.0) * 255.0)
+        for index in 0..<self.pixels.length:
+            self.pixels[index] = byte
+
+    ## Paint where it did not, and not where it did.
+    pub mutating func invert() -> !:
+        try self.require_open()
+        for index in 0..<self.pixels.length:
+            self.pixels[index] = 255 - self.pixels[index]
+
+    ## The mask as RGBA to show, `size` × `size` (the mask fitted and centred
+    ## on white): black ink where it paints.
+    pub mutating func preview(size: i64) -> const u8[]!:
+        try self.require_open()
+        try self.show_buffer(size, size)
+        let side = (usize)size
+        let scale = math.max((f64)self.columns, (f64)self.rows) / (f64)side
+        let left = ((f64)side - (f64)self.columns / scale) * 0.5
+        let top = ((f64)side - (f64)self.rows / scale) * 0.5
+        for y in 0..<side:
+            for x in 0..<side:
+                let sx = (i64)math.floor(((f64)x + 0.5 - left) * scale)
+                let sy = (i64)math.floor(((f64)y + 0.5 - top) * scale)
+                var ink: u8 = 0
+                if sx >= 0 and sy >= 0 and sx < (i64)self.columns and sy < (i64)self.rows:
+                    ink = self.pixels[(usize)sy * self.columns + (usize)sx]
+                put_gray(self.shown, y * side + x, 255 - ink)
+        return self.shown
+
+    ## A thumbnail stroke, `width` × `height` RGBA, black on white: an S from
+    ## left to right, its size easing from `taper` (0..1) of the diameter up
+    ## and back as a pen's press would when `taper` < 1. The tip is this mask,
+    ## or with `round` the round tip at `hardness`; `angle` and `roundness` as
+    ## the brush's; dabs every `spacing` of the diameter.
+    pub mutating func stroke_preview(width: i64, height: i64, round: bool, diameter: f64, hardness: f64, spacing: f64, angle: f64, roundness: f64, taper: f64 = 1.0) -> const u8[]!:
+        try self.require_open()
+        try self.show_buffer(width, height)
+        let w = (usize)width
+        let h = (usize)height
+        var ink = try alloc f64[w * h] in memory.heap
+        defer free(ink) in memory.heap
+        for index in 0..<ink.length:
+            ink[index] = 0.0
+        let size = math.clamp(diameter, 1.0, (f64)h * 0.8)
+        let radians = angle * math.pi / 180.0
+        let cosine = math.cos(radians)
+        let sine = math.sin(radians)
+        let margin = size * 0.5 + 2.0
+        var t = 0.0
+        while t <= 1.0:
+            let press = taper + (1.0 - taper) * math.sin(t * math.pi)
+            let radius = math.max(0.5, size * 0.5 * press)
+            let cx = margin + t * ((f64)w - 2.0 * margin)
+            let cy = (f64)h * 0.5 + math.sin(t * 2.0 * math.pi) * ((f64)h * 0.5 - margin) * 0.6
+            self.stamp(ink, w, h, cx, cy, radius, round, hardness, cosine, sine, math.clamp(roundness, 0.05, 1.0))
+            t += math.max(0.002, math.clamp(spacing, 0.01, 5.0) * radius * 2.0 / math.max(1.0, (f64)w - 2.0 * margin))
+        for index in 0..<w * h:
+            put_gray(self.shown, index, (u8)math.round(255.0 * (1.0 - math.clamp(ink[index], 0.0, 1.0))))
+        return self.shown
+
+    ## One dab of the preview into `ink`, laid over what is there.
+    func stamp(ink: f64[], w: usize, h: usize, cx: f64, cy: f64, radius: f64, round: bool, hardness: f64, cosine: f64, sine: f64, roundness: f64):
+        let left = (i64)math.max(0.0, math.floor(cx - radius - 1.0))
+        let right = (i64)math.min((f64)w - 1.0, math.ceil(cx + radius + 1.0))
+        let top = (i64)math.max(0.0, math.floor(cy - radius - 1.0))
+        let bottom = (i64)math.min((f64)h - 1.0, math.ceil(cy + radius + 1.0))
+        let longest = math.max((f64)self.columns, (f64)self.rows)
+        var y = top
+        while y <= bottom:
+            var x = left
+            while x <= right:
+                let px = (f64)x + 0.5 - cx
+                let py = (f64)y + 0.5 - cy
+                let qx = px * cosine + py * sine
+                let qy = (-px * sine + py * cosine) / roundness
+                var cover = 0.0
+                if round:
+                    let core = radius * hardness
+                    cover = 1.0 - smooth(core, math.max(radius, core + 0.5), math.sqrt(qx * qx + qy * qy))
+                else:
+                    let sx = (i64)math.floor((qx / (2.0 * radius) + 0.5) * longest - (longest - (f64)self.columns) * 0.5)
+                    let sy = (i64)math.floor((qy / (2.0 * radius) + 0.5) * longest - (longest - (f64)self.rows) * 0.5)
+                    if sx >= 0 and sy >= 0 and sx < (i64)self.columns and sy < (i64)self.rows:
+                        cover = (f64)self.pixels[(usize)sy * self.columns + (usize)sx] / 255.0
+                let at = (usize)y * w + (usize)x
+                ink[at] = ink[at] + cover * (1.0 - ink[at])
+                x += 1
+            y += 1
+
+    ## The shown buffer at `width` × `height` RGBA, 1..1024 a side.
+    mutating func show_buffer(width: i64, height: i64) -> !:
+        if width < 1 or height < 1 or width > 1024 or height > 1024:
+            error(invalid, "a brush preview is 1..1024 pixels a side")
+        let bytes = (usize)width * (usize)height * 4
+        if self.shown.length != bytes:
+            if self.shown.length > 0:
+                free(self.shown) in memory.heap
+            var none_shown: u8[]
+            self.shown = none_shown
+            self.shown = try alloc u8[bytes] in memory.heap
+
+    func require_open() -> !:
+        if self.closed:
+            error(invalid, "the brush mask is closed")
+
+    pub mutating func close():
+        if self.closed:
+            return
+        self.closed = true
+        free(self.pixels) in memory.heap
+        if self.shown.length > 0:
+            free(self.shown) in memory.heap
+
+pub let brush_mask_type: interop.Type[BrushMask] = interop.Type[BrushMask]("BrushMask", BrushMask.close, closeable = true)
+
+## 0 inside `core`, 1 past `edge`, a smooth step between.
+func smooth(core: f64, edge: f64, distance: f64) -> f64:
+    if distance <= core:
+        return 0.0
+    if distance >= edge:
+        return 1.0
+    let t = (distance - core) / (edge - core)
+    return t * t * (3.0 - 2.0 * t)
+
+func put_gray(rgba: u8[], index: usize, value: u8):
+    rgba[index * 4] = value
+    rgba[index * 4 + 1] = value
+    rgba[index * 4 + 2] = value
+    rgba[index * 4 + 3] = 255
+
+## How much of the source box (`x0`, `y0`)..(`x1`, `y1`) paints, 0..1: its
+## pixels' darkness times their alpha, averaged; outside the picture nothing.
+func covered(rgba: const u8[], width: usize, height: usize, x0: f64, y0: f64, x1: f64, y1: f64) -> f64:
+    let left = (i64)math.floor(x0)
+    let top = (i64)math.floor(y0)
+    let right = math.max((f64)left + 1.0, math.ceil(x1))
+    let bottom = math.max((f64)top + 1.0, math.ceil(y1))
+    var sum = 0.0
+    var count = 0.0
+    var y = top
+    while (f64)y < bottom:
+        var x = left
+        while (f64)x < right:
+            count += 1.0
+            if x >= 0 and y >= 0 and x < (i64)width and y < (i64)height:
+                let at = ((usize)y * width + (usize)x) * 4
+                let luma = (0.299 * (f64)rgba[at] + 0.587 * (f64)rgba[at + 1] + 0.114 * (f64)rgba[at + 2]) / 255.0
+                sum += (1.0 - luma) * (f64)rgba[at + 3] / 255.0
+            x += 1
+        y += 1
+    return sum / count if count > 0.0 else 0.0
+
+test "a mask paints, erases, clears and inverts":
+    let mask = try BrushMask.create(32, 32)
+    defer mask.release()
+    let m = mask.value()
+    assert(try m.is_empty())
+    try m.dab(16.0, 16.0, 6.0, 1.0, 1.0)
+    let pixels = try m.coverage()
+    assert(pixels[16 * 32 + 16] == 255 and pixels[16 * 32 + 25] == 0)
+    try m.dab(16.0, 16.0, 3.0, 1.0, 0.0)
+    assert(pixels[16 * 32 + 16] == 0 and pixels[16 * 32 + 20] == 255)
+    try m.line(2.0, 2.0, 30.0, 2.0, 1.5, 1.0, 1.0)
+    assert(pixels[2 * 32 + 10] == 255 and pixels[2 * 32 + 20] == 255)
+    try m.invert()
+    assert(pixels[2 * 32 + 10] == 0 and pixels[31 * 32] == 255)
+    let kept = try m.copy()
+    defer kept.release()
+    try m.clear()
+    assert(try m.is_empty())
+    assert(not try kept.value().is_empty() and (try kept.value().coverage())[31 * 32] == 255)
+
+test "a picture becomes coverage, dark and opaque painting, fitted with its aspect kept":
+    # A 4 × 2 picture: black, white, transparent black, grey.
+    var rgba: u8[32] = [0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+                        0, 0, 0, 0, 0, 0, 0, 0, 128, 128, 128, 255, 128, 128, 128, 255]
+    let taken = try BrushMask.from_rgba8(rgba[..<32], 4, 2)
+    defer taken.release()
+    assert((try taken.value().width()) == 4 and (try taken.value().height()) == 2)
+    let pixels = try taken.value().coverage()
+    assert(pixels[0] == 255 and pixels[2] == 0 and pixels[4] == 0 and pixels[6] > 120 and pixels[6] < 130)
+    # Into a square mask: the wide picture fills its middle band.
+    let square = try BrushMask.create(8, 8)
+    defer square.release()
+    try square.value().draw_rgba8(rgba[..<32], 4, 2)
+    let fitted = try square.value().coverage()
+    assert(fitted[0] == 0 and fitted[2 * 8 + 0] == 255 and fitted[7 * 8] == 0)
+
+test "the round tip fills the mask as the brush paints it":
+    let mask = try BrushMask.create(64, 64)
+    defer mask.release()
+    try mask.value().draw_round(1.0, 90.0, 0.25)
+    let pixels = try mask.value().coverage()
+    # Turned upright and a quarter as wide: tall and thin.
+    assert(pixels[10 * 64 + 32] == 255 and pixels[32 * 64 + 10] == 0 and pixels[32 * 64 + 32] == 255)
+    try mask.value().draw_round(0.0, 0.0, 1.0)
+    assert(pixels[32 * 64 + 32] > 250 and pixels[32 * 64 + 50] < pixels[32 * 64 + 40] and pixels[0] == 0)
+
+test "previews show the mask and a stroke of it, black on white":
+    let mask = try BrushMask.create(16, 16)
+    defer mask.release()
+    try mask.value().clear(1.0)
+    let shown = try mask.value().preview(32)
+    assert(shown.length == 32 * 32 * 4 and shown[(16 * 32 + 16) * 4] == 0 and shown[(16 * 32 + 16) * 4 + 3] == 255)
+    let stroke = try mask.value().stroke_preview(120, 40, false, 16.0, 1.0, 0.1, 0.0, 1.0, 0.3)
+    assert(stroke.length == 120 * 40 * 4)
+    var inked = 0
+    for index in 0..<120 * 40:
+        if stroke[index * 4] < 128:
+            inked += 1
+    assert(inked > 400 and inked < 120 * 40)
+    let round = try mask.value().stroke_preview(120, 40, true, 16.0, 0.5, 0.25, 0.0, 1.0)
+    assert(round[(20 * 120 + 60) * 4] < 128 or round[(20 * 120 + 9) * 4] < 128)

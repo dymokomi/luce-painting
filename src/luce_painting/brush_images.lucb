@@ -1,0 +1,330 @@
+## A brush's images: its sampled tip and its texture, grayscale coverage bytes
+## (255 paints fully), kept on the CPU and made into r8 textures on the device
+## that paints with them, on first use. The tip keeps a chain of halved copies
+## so a small dab samples a copy near its own size instead of skipping over a
+## large image's texels; the texture tiles in document space. The built-in
+## textures (grain, canvas, dots) are images made here, so every textured
+## brush goes the same way through the dab shader.
+import gpu
+import math
+import memory
+from raster_errors import invalid
+
+## The largest tip or texture side.
+pub let brush_image_limit: usize = 1024
+## The built-in textures' side: their patterns repeat within it.
+pub let builtin_side: usize = 256
+## Texture kinds: none, the three built-ins, and the brush's own image.
+pub let texture_none: i64 = 0
+pub let texture_grain: i64 = 1
+pub let texture_canvas: i64 = 2
+pub let texture_dots: i64 = 3
+pub let texture_image: i64 = 4
+
+## One level of a tip's chain on the device.
+struct TipLevel:
+    var texture: gpu.Texture
+    var width: u32
+    var height: u32
+
+## A texture a stroke samples, with its size in texels.
+pub struct Sampled:
+    pub var texture: gpu.Texture
+    pub var width: u32
+    pub var height: u32
+
+## The brush's images. The zero value has no tip (the round one paints) and
+## no texture image.
+pub struct BrushImages:
+    var tip: u8[]
+    var tip_width: usize
+    var tip_height: usize
+    var levels: TipLevel[12]
+    var level_count: usize
+    var pattern: u8[]
+    var pattern_width: usize
+    var pattern_height: usize
+    ## The texture on the device, and which kind it holds (-1: none made).
+    var pattern_texture: gpu.Texture?
+    var pattern_kind: i64
+    var pattern_made: bool
+
+    ## Take a copy of `pixels`, `width` × `height` coverage bytes, as the tip;
+    ## no pixels go back to the round tip. The same tip again changes nothing,
+    ## so an editor may set it before every stroke.
+    pub mutating func set_tip(pixels: const u8[], width: usize, height: usize) -> !:
+        try check_image(pixels, width, height)
+        if width == self.tip_width and height == self.tip_height and same_bytes(pixels, self.tip):
+            return
+        self.drop_tip()
+        if pixels.length == 0:
+            return
+        self.tip = try copy_bytes(pixels)
+        self.tip_width = width
+        self.tip_height = height
+
+    ## Take a copy of `pixels` as the texture image (kind 4); none drops it.
+    pub mutating func set_pattern(pixels: const u8[], width: usize, height: usize) -> !:
+        try check_image(pixels, width, height)
+        if width == self.pattern_width and height == self.pattern_height and same_bytes(pixels, self.pattern):
+            return
+        self.drop_pattern()
+        if pixels.length == 0:
+            return
+        self.pattern = try copy_bytes(pixels)
+        self.pattern_width = width
+        self.pattern_height = height
+
+    ## Whether a sampled tip is set.
+    pub func has_tip() -> bool:
+        return self.tip.length > 0
+
+    ## Whether a texture image is set.
+    pub func has_pattern() -> bool:
+        return self.pattern.length > 0
+
+    ## The tip's width over its longer side and its height over it: how the
+    ## dab's circle maps onto the image.
+    pub func tip_aspect() -> (f64, f64):
+        let longest = (f64)math_max(self.tip_width, self.tip_height)
+        if longest <= 0.0:
+            return (1.0, 1.0)
+        return ((f64)self.tip_width / longest, (f64)self.tip_height / longest)
+
+    ## The tip on `device` for a dab `diameter` pixels across: the smallest
+    ## copy still at least that big, made on first use; none without a tip.
+    pub mutating func tip_for(device: gpu.Device, diameter: f64) -> Sampled?!:
+        if self.tip.length == 0:
+            return none
+        if self.level_count == 0:
+            try self.make_levels(device)
+        var chosen: usize = 0
+        while chosen + 1 < self.level_count and (f64)math_max((usize)self.levels[chosen + 1].width, (usize)self.levels[chosen + 1].height) >= diameter:
+            chosen += 1
+        let level = self.levels[chosen]
+        return Sampled(texture = level.texture, width = level.width, height = level.height)
+
+    ## The texture of `kind` on `device` (a built-in, or the image), made on
+    ## first use; none for no texture, or for the image when none is set.
+    pub mutating func pattern_for(device: gpu.Device, kind: i64) -> Sampled?!:
+        if kind == texture_none or (kind == texture_image and self.pattern.length == 0):
+            return none
+        if kind < 0 or kind > texture_image:
+            error(invalid, "brush texture kind must be 0..4")
+        if not self.pattern_made or self.pattern_kind != kind:
+            self.drop_pattern_texture()
+            var width = builtin_side
+            var height = builtin_side
+            var made = gpu.Texture()
+            if kind == texture_image:
+                width = self.pattern_width
+                height = self.pattern_height
+                made = try upload_r8(device, self.pattern, width, height)
+            else:
+                let pixels = try builtin_pattern(kind)
+                defer free(pixels) in memory.heap
+                made = try upload_r8(device, pixels, width, height)
+            self.pattern_texture = made
+            self.pattern_kind = kind
+            self.pattern_made = true
+        let texture = self.pattern_texture else return none
+        let width = (u32)(self.pattern_width if kind == texture_image else builtin_side)
+        let height = (u32)(self.pattern_height if kind == texture_image else builtin_side)
+        return Sampled(texture = texture, width = width, height = height)
+
+    ## The chain: the tip, then each half of the last, down to 8 pixels.
+    mutating func make_levels(device: gpu.Device) -> !:
+        var width = self.tip_width
+        var height = self.tip_height
+        var current = try copy_bytes(self.tip)
+        defer free(current) in memory.heap
+        while self.level_count < self.levels.length:
+            let texture = try upload_r8(device, current, width, height)
+            self.levels[self.level_count] = TipLevel(texture = texture, width = (u32)width, height = (u32)height)
+            self.level_count += 1
+            if width <= 8 and height <= 8:
+                break
+            let half_width = math_max(1, width // 2)
+            let half_height = math_max(1, height // 2)
+            let halved = try halve(current, width, height, half_width, half_height)
+            free(current) in memory.heap
+            current = halved
+            width = half_width
+            height = half_height
+
+    mutating func drop_tip():
+        for index in 0..<self.level_count:
+            self.levels[index].texture.destroy()
+        self.level_count = 0
+        if self.tip.length > 0:
+            free(self.tip) in memory.heap
+        var empty: u8[]
+        self.tip = empty
+        self.tip_width = 0
+        self.tip_height = 0
+
+    mutating func drop_pattern_texture():
+        if let texture = self.pattern_texture:
+            var owned = texture
+            owned.destroy()
+        self.pattern_texture = none
+        self.pattern_made = false
+
+    mutating func drop_pattern():
+        if self.pattern_kind == texture_image:
+            self.drop_pattern_texture()
+        if self.pattern.length > 0:
+            free(self.pattern) in memory.heap
+        var empty: u8[]
+        self.pattern = empty
+        self.pattern_width = 0
+        self.pattern_height = 0
+
+    ## Let the images and their textures go.
+    pub mutating func destroy():
+        self.drop_tip()
+        self.drop_pattern_texture()
+        self.drop_pattern()
+
+func check_image(pixels: const u8[], width: usize, height: usize) -> !:
+    if pixels.length == 0:
+        return
+    if width < 1 or height < 1 or width > brush_image_limit or height > brush_image_limit or pixels.length != width * height:
+        error(invalid, "a brush image is 1..1024 pixels a side, one byte a pixel")
+
+func same_bytes(a: const u8[], b: const u8[]) -> bool:
+    if a.length != b.length:
+        return false
+    for index in 0..<a.length:
+        if a[index] != b[index]:
+            return false
+    return true
+
+func copy_bytes(pixels: const u8[]) -> u8[]!:
+    let copy = try alloc u8[pixels.length] in memory.heap
+    memory.copy(copy, pixels, pixels.length)
+    return copy
+
+func upload_r8(device: gpu.Device, pixels: const u8[], width: usize, height: usize) -> gpu.Texture!:
+    var texture = try gpu.Texture.create(device, (u32)width, (u32)height, gpu.Format.r8)
+    errdefer texture.destroy()
+    try texture.upload(pixels)
+    return texture
+
+func math_max(a: usize, b: usize) -> usize:
+    return a if a > b else b
+
+## `pixels` (`width` × `height`) averaged down to `to_width` × `to_height`, each
+## target pixel the mean of the source pixels it covers.
+pub func halve(pixels: const u8[], width: usize, height: usize, to_width: usize, to_height: usize) -> u8[]!:
+    let out = try alloc u8[to_width * to_height] in memory.heap
+    for y in 0..<to_height:
+        let top = y * height // to_height
+        let bottom = math_max(top + 1, (y + 1) * height // to_height)
+        for x in 0..<to_width:
+            let left = x * width // to_width
+            let right = math_max(left + 1, (x + 1) * width // to_width)
+            var sum: usize = 0
+            for sy in top..<bottom:
+                for sx in left..<right:
+                    sum += (usize)pixels[sy * width + sx]
+            out[y * to_width + x] = (u8)((sum + (right - left) * (bottom - top) // 2) // ((right - left) * (bottom - top)))
+    return out
+
+## A built-in texture, `builtin_side` square, repeating seamlessly: grain (a
+## smoothed value per 3-ish pixel cell), canvas (two crossed weaves every 4
+## pixels) or dots (a round hole every 8 pixels).
+pub func builtin_pattern(kind: i64) -> u8[]!:
+    let side = builtin_side
+    let pixels = try alloc u8[side * side] in memory.heap
+    # Grain: 64 cells of 4 pixels a side, wrapping, blended bilinearly.
+    let cells: usize = 64
+    for y in 0..<side:
+        for x in 0..<side:
+            var value = 1.0
+            if kind == texture_grain:
+                let fx = (f64)x / 4.0
+                let fy = (f64)y / 4.0
+                let cx = (usize)math.floor(fx)
+                let cy = (usize)math.floor(fy)
+                let tx = fx - math.floor(fx)
+                let ty = fy - math.floor(fy)
+                let a = cell_hash(cx % cells, cy % cells) * (1.0 - tx) + cell_hash((cx + 1) % cells, cy % cells) * tx
+                let b = cell_hash(cx % cells, (cy + 1) % cells) * (1.0 - tx) + cell_hash((cx + 1) % cells, (cy + 1) % cells) * tx
+                value = a * (1.0 - ty) + b * ty
+            elif kind == texture_canvas:
+                let w = 2.0 * math.pi / 4.0
+                value = math.clamp(0.5 + 0.25 * math.sin((f64)x * w) + 0.25 * math.sin((f64)y * w), 0.0, 1.0)
+            elif kind == texture_dots:
+                let lx = (f64)(x % 8) + 0.5 - 4.0
+                let ly = (f64)(y % 8) + 0.5 - 4.0
+                let d = math.sqrt(lx * lx + ly * ly) / 8.0
+                value = 1.0 - math.clamp((d - 0.25) / 0.15, 0.0, 1.0)
+            pixels[y * side + x] = (u8)math.round(value * 255.0)
+    return pixels
+
+## A repeatable value 0..1 per grain cell.
+func cell_hash(x: usize, y: usize) -> f64:
+    var state = (u64)x *% 0x9E3779B97F4A7C15 ^ ((u64)y *% 0xC2B2AE3D27D4EB4F)
+    state ^= state >> 29
+    state *%= 0xBF58476D1CE4E5B9
+    state ^= state >> 32
+    return (f64)(state >> 11) / 9007199254740992.0
+
+test "a tip's chain halves down to eight pixels, and a dab takes the smallest copy that covers it":
+    var device = gpu.Device.open() catch failure:
+        assert(failure.code == gpu.unavailable)
+        return
+    defer device.destroy()
+    var images = BrushImages()
+    defer images.destroy()
+    let pixels = try alloc u8[(usize)100 * 50] in memory.heap
+    defer free(pixels) in memory.heap
+    for index in 0..<pixels.length:
+        pixels[index] = 255
+    try images.set_tip(pixels, 100, 50)
+    assert(images.has_tip())
+    let aspect = images.tip_aspect()
+    assert(aspect.0 == 1.0 and aspect.1 == 0.5)
+    let whole = (try images.tip_for(device, 90.0)) else trap("tip")
+    assert(whole.width == 100 and whole.height == 50)
+    let small = (try images.tip_for(device, 20.0)) else trap("tip")
+    assert(small.width == 25 and small.height == 12)
+    let least = (try images.tip_for(device, 1.0)) else trap("tip")
+    assert(least.width <= 8 and least.height <= 8)
+    # The same tip again keeps its textures.
+    try images.set_tip(pixels, 100, 50)
+    assert(images.level_count > 1)
+    var none_left: u8[]
+    try images.set_tip(none_left, 0, 0)
+    assert(not images.has_tip() and (try images.tip_for(device, 10.0)) == none)
+
+test "halving averages the pixels each target covers":
+    var pixels: u8[4] = [0, 255, 255, 255]
+    let half = try halve(pixels[..<4], 2, 2, 1, 1)
+    defer free(half) in memory.heap
+    assert(half[0] == 191)
+
+test "the built-in textures repeat seamlessly across their side":
+    for kind in [texture_grain, texture_canvas, texture_dots]:
+        let pixels = try builtin_pattern(kind)
+        defer free(pixels) in memory.heap
+        var low: u8 = 255
+        var high: u8 = 0
+        for value in pixels:
+            low = value if value < low else low
+            high = value if value > high else high
+        assert(high - low > 100)
+        # The last column meets the first as any two neighbours do.
+        for y in 0..<builtin_side:
+            let edge = (i64)pixels[y * builtin_side + builtin_side - 1] - (i64)pixels[y * builtin_side]
+            assert(edge < 128 and edge > -128)
+
+test "a brush image past the limit or of the wrong length is refused":
+    var images = BrushImages()
+    defer images.destroy()
+    var pixels: u8[4] = [1, 2, 3, 4]
+    images.set_tip(pixels[..<4], 3, 1) catch failure:
+        assert(failure.code == invalid)
+        return
+    assert(false)
