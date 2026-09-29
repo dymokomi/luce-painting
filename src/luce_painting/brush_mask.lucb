@@ -48,6 +48,35 @@ pub struct BrushMask:
         try mask.value().draw_rgba8(rgba, width, height)
         return mask
 
+    ## A mask of coverage bytes (`width` × `height`, 255 paints), as brush
+    ## files keep tips and textures, box-filtered down to fit 1024 pixels a
+    ## side when larger.
+    pub static func from_coverage(coverage: const u8[], width: usize, height: usize) -> interop.Reference[BrushMask]!:
+        if width == 0 or height == 0 or coverage.length < width * height:
+            error(invalid, "the coverage does not fill its size")
+        let scale = math.min(1.0, (f64)brush_image_limit / (f64)(width if width > height else height))
+        let columns = (usize)math.max(1.0, math.round((f64)width * scale))
+        let rows = (usize)math.max(1.0, math.round((f64)height * scale))
+        let mask = try BrushMask.own(columns, rows)
+        let pixels = mask.value().pixels
+        if columns == width and rows == height:
+            memory.copy(pixels, coverage, width * height)
+            return mask
+        let step_x = (f64)width / (f64)columns
+        let step_y = (f64)height / (f64)rows
+        for y in 0..<rows:
+            let top = (usize)((f64)y * step_y)
+            let bottom = (usize)math.clamp(math.ceil((f64)(y + 1) * step_y), (f64)(top + 1), (f64)height)
+            for x in 0..<columns:
+                let left = (usize)((f64)x * step_x)
+                let right = (usize)math.clamp(math.ceil((f64)(x + 1) * step_x), (f64)(left + 1), (f64)width)
+                var sum: usize = 0
+                for sy in top..<bottom:
+                    for sx in left..<right:
+                        sum += (usize)coverage[sy * width + sx]
+                pixels[y * columns + x] = (u8)((sum + (bottom - top) * (right - left) // 2) // ((bottom - top) * (right - left)))
+        return mask
+
     ## A mask of its own with the same pixels.
     pub func copy() -> interop.Reference[BrushMask]!:
         try self.require_open()
@@ -374,3 +403,17 @@ test "previews show the mask and a stroke of it, black on white":
     assert(inked > 400 and inked < 120 * 40)
     let round = try mask.value().stroke_preview(120, 40, true, 16.0, 0.5, 0.25, 0.0, 1.0)
     assert(round[(20 * 120 + 60) * 4] < 128 or round[(20 * 120 + 9) * 4] < 128)
+
+test "coverage becomes a mask as is, or box-filtered down to fit":
+    var small: u8[6] = [0, 255, 128, 64, 32, 16]
+    let exact = try BrushMask.from_coverage(small[..<6], 3, 2)
+    defer exact.release()
+    assert((try exact.value().width()) == 3 and (try exact.value().coverage())[1] == 255)
+    let wide = try alloc u8[2048 * 4] in memory.heap
+    defer free(wide) in memory.heap
+    for index in 0..<wide.length:
+        wide[index] = 255 if index % 2 == 0 else 0
+    let shrunk = try BrushMask.from_coverage(wide, 2048, 4)
+    defer shrunk.release()
+    assert((try shrunk.value().width()) == 1024 and (try shrunk.value().height()) == 2)
+    assert((try shrunk.value().coverage())[0] == 128)
