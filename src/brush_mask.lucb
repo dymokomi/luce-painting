@@ -5,10 +5,10 @@
 ## `preview` and `stroke_preview` are RGBA to show it. Opening one from a file
 ## and keeping it as PNG is luce-image's (brush_files).
 import interop
-import math
+import luce_std.math
 import memory
-from luce_painting.brush_images import brush_image_limit
-from raster_errors import invalid
+from brush_images import brush_image_limit
+from luce_raster.errors import invalid
 
 pub struct BrushMask:
     var columns: usize

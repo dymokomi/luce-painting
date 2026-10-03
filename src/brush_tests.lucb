@@ -1,14 +1,14 @@
 ## The brush engine's dynamics, sampled tips and textures, painted on the GPU
 ## and read back: what a pen sample, a tip image or a texture does to the dabs.
-import gpu
+import luce_gpu.gpu
 import memory
-import math
-from tiles import Tiles
-from luce_painting.mixing import Mixing
-from luce_painting.paint import Brush, Painter
-from luce_painting.stroke import Stroke, PaintTarget
-from luce_painting.brush_images import BrushImages, texture_image
-from luce_painting.dynamics import Dynamic, Control, Pen, dynamic_size, dynamic_angle, dynamic_flow, dynamic_opacity
+import luce_std.math
+from luce_canvas.tiles import Tiles
+from mixing import Mixing
+from paint import Brush, Painter
+from stroke import Stroke, PaintTarget
+from brush_images import BrushImages, texture_image
+from dynamics import Dynamic, Control, Pen, dynamic_size, dynamic_angle, dynamic_flow, dynamic_opacity
 
 ## A 128 × 128 layer's tiles, mixing as a document does by default (sRGB
 ## encoded), its painter, and pixels to read into.

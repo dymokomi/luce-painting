@@ -33,8 +33,8 @@ def dependency "luce-painting" {
 | `heal` | `heal`: the spot healing fill of a painted hole |
 
 ```luce
-from paint import Brush, Painter
-from stroke import Stroke, PaintTarget
+from luce_painting.paint import Brush, Painter
+from luce_painting.stroke import Stroke, PaintTarget
 
 var painter = try Painter.create(device)
 var stroke = try Stroke.begin(&painter, PaintTarget(tiles = &tiles), Brush(diameter = 40.0), 10.0, 10.0)
@@ -54,7 +54,7 @@ skip where no device opens.
 The shaders are generated: after changing one, run
 
 ```
-python3 ../luce-gpu/tools/embed_shaders.py --public -I ../luce-color/shaders src/luce_painting/shaders.lucb src/luce_painting/shaders/dab.frag src/luce_painting/shaders/paint.frag src/luce_painting/shaders/gradient.frag
+python3 ../luce-gpu/tools/embed_shaders.py --public -I ../luce-color/shaders src/shaders.lucb src/shaders/dab.frag src/shaders/paint.frag src/shaders/gradient.frag
 ```
 
 `srgb.glsl`, the sRGB curve the paint and gradient passes mix through, is

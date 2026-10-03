@@ -23,15 +23,15 @@
 #
 #==============================================================================================
 
-import gpu
+import luce_gpu.gpu
 import memory
-import math
-from tiles import Tiles, tile_size, tile_texture
-from luce_painting.mixing import Mixing
-from luce_painting.paint import Brush, Painter
-from luce_painting.dynamics import Control, Pen, Inputs, response, angle_turn, blend_pens, velocity_value, dynamic_size, dynamic_flow, dynamic_opacity, dynamic_angle, dynamic_roundness, dynamic_scatter, dynamic_texture_depth, dynamic_hue, dynamic_saturation, dynamic_brightness
-from luce_painting.brush_images import BrushImages, Sampled
-from raster_errors import invalid, limit
+import luce_std.math
+from luce_canvas.tiles import Tiles, tile_size, tile_texture
+from mixing import Mixing
+from paint import Brush, Painter
+from dynamics import Control, Pen, Inputs, response, angle_turn, blend_pens, velocity_value, dynamic_size, dynamic_flow, dynamic_opacity, dynamic_angle, dynamic_roundness, dynamic_scatter, dynamic_texture_depth, dynamic_hue, dynamic_saturation, dynamic_brightness
+from brush_images import BrushImages, Sampled
+from luce_raster.errors import invalid, limit
 
 ## What a stroke paints on, as the caller finds it for each call: a layer's
 ## pixels or its mask, and the revision a stamp bumps (an adjustment layer's

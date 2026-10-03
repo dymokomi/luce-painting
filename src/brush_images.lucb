@@ -5,10 +5,10 @@
 ## large image's texels; the texture tiles in document space. The built-in
 ## textures (grain, canvas, dots) are images made here, so every textured
 ## brush goes the same way through the dab shader.
-import gpu
-import math
+import luce_gpu.gpu
+import luce_std.math
 import memory
-from raster_errors import invalid
+from luce_raster.errors import invalid
 
 ## The largest tip or texture side.
 pub let brush_image_limit: usize = 1024

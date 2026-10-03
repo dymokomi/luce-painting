@@ -20,7 +20,7 @@ def main():
         for module in MODULES:
             print(f'TEST {module} {backend}', flush=True)
             # A module is a file, or a directory of files listed in its ORDER.
-            target = ROOT / f'src/luce_painting/{module}'
+            target = ROOT / f'src/{module}'
             target = target if target.is_dir() else target.with_suffix('.lucb')
             subprocess.run([str(args.base.resolve()), 'test', str(target), backend], check=True, cwd=ROOT, env=env, timeout=900)
     print('PASS luce-painting', flush=True)

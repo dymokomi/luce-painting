@@ -13,11 +13,11 @@
 #
 #==============================================================================================
 
-import gpu
-import math
+import luce_gpu.gpu
+import luce_std.math
 import memory
-import transfer
-from half import from_half
+import luce_color.transfer
+from luce_canvas.half import from_half
 
 ## How one edit mixes: its colors as sRGB-encoded values (`srgb`), and whether
 ## it works on a mask.

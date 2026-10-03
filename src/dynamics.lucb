@@ -4,8 +4,8 @@
 ## the control's 0) to its full value (at 1), through a response curve. The
 ## angle instead turns by the control: the pen's azimuth, its rotation or the
 ## stroke's direction exactly, anything else over the full circle.
-import math
-from raster_errors import invalid
+import luce_std.math
+from luce_raster.errors import invalid
 
 ## What drives a parameter.
 pub enum Control as u8:

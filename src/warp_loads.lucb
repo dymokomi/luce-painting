@@ -8,12 +8,12 @@
 ## leaves the device's other readback slots to everything else. A finished
 ## batch's cells are turned into the working copy's samples across the
 ## processors, so a frame spends little on them.
-import math
+import luce_std.math
 import memory
-import pool
-import gpu
-from tiles import Tiles, tile_size
-from half import from_half
+import luce_canvas.pool
+import luce_gpu.gpu
+from luce_canvas.tiles import Tiles, tile_size
+from luce_canvas.half import from_half
 
 ## A cell of the working copy: 256 rows of 256 premultiplied RGBA f32 samples.
 pub let cell_samples: usize = (usize)tile_size * (usize)tile_size * 4

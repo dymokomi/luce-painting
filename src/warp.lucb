@@ -20,19 +20,19 @@
 ## what changed. The worker waits for a segment's cells before its dabs. So no
 ## pointer event ever waits on the GPU. Ending the path returns at once; the
 ## worker finishes it.
-import math
+import luce_std.math
 import memory
-import pool
+import luce_canvas.pool
 import os
 import thread
 import time
-from tiles import Tiles, Cell, tile_size
-from raster_errors import invalid
-from luce_painting.warp_queue import WarpQueue
-from luce_painting.warp_loads import CellLoader, cell_samples, cell_bytes, unpack_cell
-from luce_painting.mixing import EncodingTables
-from half import to_half
-import gpu
+from luce_canvas.tiles import Tiles, Cell, tile_size
+from luce_raster.errors import invalid
+from warp_queue import WarpQueue
+from warp_loads import CellLoader, cell_samples, cell_bytes, unpack_cell
+from mixing import EncodingTables
+from luce_canvas.half import to_half
+import luce_gpu.gpu
 
 ## Smudge's dab spacing by default, a fraction of the diameter: nearly twice
 ## the 0.08 it was, halving the dabs. Wider shows each dab: the carried
