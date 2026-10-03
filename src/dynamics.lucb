@@ -4,7 +4,7 @@
 ## the control's 0) to its full value (at 1), through a response curve. The
 ## angle instead turns by the control: the pen's azimuth, its rotation or the
 ## stroke's direction exactly, anything else over the full circle.
-import luce_std.math
+from luce_std import math
 from luce_raster.errors import invalid
 
 ## What drives a parameter.

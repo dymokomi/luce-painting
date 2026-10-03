@@ -1,8 +1,8 @@
 ## The brush engine's dynamics, sampled tips and textures, painted on the GPU
 ## and read back: what a pen sample, a tip image or a texture does to the dabs.
-import luce_gpu.gpu
+from luce_gpu import gpu
 import memory
-import luce_std.math
+from luce_std import math
 from luce_canvas.tiles import Tiles
 from mixing import Mixing
 from paint import Brush, Painter

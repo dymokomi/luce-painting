@@ -1,7 +1,7 @@
 #prisma 4.0
 def package "luce-painting" {
     str owner = "dymokomi"
-    str version = "0.2.0"
+    str version = "0.2.1"
     str kind = "package"
     str language = "luce-base"
     str description = "The brush engine behind luced-2d: Photoshop-style brushes with dynamics, sampled tips and textures, strokes stamped on the GPU a tile at a time, smudge on a worker, healing, and brush masks."

@@ -23,9 +23,9 @@
 #
 #==============================================================================================
 
-import luce_gpu.gpu
+from luce_gpu import gpu
 import memory
-import luce_std.math
+from luce_std import math
 from luce_canvas.tiles import Tiles, tile_size, tile_texture
 from mixing import Mixing
 from paint import Brush, Painter

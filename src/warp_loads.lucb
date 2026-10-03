@@ -8,10 +8,10 @@
 ## leaves the device's other readback slots to everything else. A finished
 ## batch's cells are turned into the working copy's samples across the
 ## processors, so a frame spends little on them.
-import luce_std.math
+from luce_std import math
 import memory
-import luce_canvas.pool
-import luce_gpu.gpu
+from luce_canvas import pool
+from luce_gpu import gpu
 from luce_canvas.tiles import Tiles, tile_size
 from luce_canvas.half import from_half
 

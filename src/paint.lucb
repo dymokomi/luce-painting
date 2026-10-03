@@ -9,8 +9,8 @@
 #
 #==============================================================================================
 
-import luce_gpu.gpu
-import luce_std.math
+from luce_gpu import gpu
+from luce_std import math
 from luce_canvas.tiles import tile_size
 from mixing import Mixing
 from dynamics import Dynamic

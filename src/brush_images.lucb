@@ -5,8 +5,8 @@
 ## large image's texels; the texture tiles in document space. The built-in
 ## textures (grain, canvas, dots) are images made here, so every textured
 ## brush goes the same way through the dab shader.
-import luce_gpu.gpu
-import luce_std.math
+from luce_gpu import gpu
+from luce_std import math
 import memory
 from luce_raster.errors import invalid
 

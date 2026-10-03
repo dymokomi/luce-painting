@@ -5,7 +5,7 @@
 ## solved by over-relaxation), so the patch brings its texture and takes the
 ## surrounding tone: Poisson cloning. When no shift fits, the hole is filled
 ## with the ring's harmonic interpolation. On the CPU, once per stroke.
-import luce_std.math
+from luce_std import math
 import memory
 from luce_raster.errors import invalid
 
