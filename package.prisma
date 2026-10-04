@@ -1,7 +1,7 @@
 #prisma 4.0
 def package "luce-painting" {
     str owner = "dymokomi"
-    str version = "0.2.1"
+    str version = "0.2.2"
     str kind = "package"
     str language = "luce-base"
     str description = "The brush engine behind luced-2d: Photoshop-style brushes with dynamics, sampled tips and textures, strokes stamped on the GPU a tile at a time, smudge on a worker, healing, and brush masks."
@@ -10,13 +10,13 @@ def package "luce-painting" {
 
     def dependency "luce-std" {
         str owner = "dymokomi"
-        str version = "^0.2.0"
+        str version = "^0.3.1"
         str path = "../luce-std"
     }
 
     def dependency "luce-gpu" {
         str owner = "dymokomi"
-        str version = "^0.2.0"
+        str version = "^0.2.2"
         str path = "../luce-gpu"
     }
 
@@ -28,13 +28,13 @@ def package "luce-painting" {
 
     def dependency "luce-color" {
         str owner = "dymokomi"
-        str version = "^0.3.0"
+        str version = "^0.3.2"
         str path = "../luce-color"
     }
 
     def dependency "luce-canvas" {
         str owner = "dymokomi"
-        str version = "^0.2.0"
+        str version = "^0.2.2"
         str path = "../luce-canvas"
     }
 }
