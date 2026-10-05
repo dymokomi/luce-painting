@@ -51,7 +51,7 @@ pub struct CellLoader:
     pub var encoded: f32[]
 
     ## A loader for `count` cells, `columns` a row.
-    pub func create(count: usize, columns: usize) -> CellLoader!:
+    pub static func create(count: usize, columns: usize) -> CellLoader!:
         let requested = try new bool[count] --- in memory.heap
         errdefer free(requested) in memory.heap
         for index in 0..<count:

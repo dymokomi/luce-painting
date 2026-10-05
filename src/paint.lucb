@@ -98,7 +98,7 @@ pub struct Painter:
     pub var black: gpu.Texture
     pub var clear: gpu.Texture
 
-    pub func create(device: gpu.Device) -> Painter!:
+    pub static func create(device: gpu.Device) -> Painter!:
         var dab_shader = try gpu.Shader.create(device, dab_frag_words, dab_frag_msl)
         errdefer dab_shader.destroy()
         var paint_shader = try gpu.Shader.create(device, paint_frag_words, paint_frag_msl)

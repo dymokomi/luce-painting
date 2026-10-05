@@ -146,7 +146,7 @@ pub struct Stroke:
     ## `on_mask`), painting the first dab there. A mask's missing cells count as
     ## white (revealing). The tip and texture come from `images` (none: round,
     ## untextured); they must stay while the stroke lasts.
-    pub func begin(painter: Painter*, target: PaintTarget, brush: Brush, x: f64, y: f64, on_mask: bool = false, pen: Pen = Pen(), images: BrushImages*? = none) -> Stroke!:
+    pub static func begin(painter: Painter*, target: PaintTarget, brush: Brush, x: f64, y: f64, on_mask: bool = false, pen: Pen = Pen(), images: BrushImages*? = none) -> Stroke!:
         try brush.check()
         let tiles = target.tiles
         if not math.is_finite(x) or not math.is_finite(y):
@@ -425,7 +425,7 @@ pub struct Stroke:
         self.touched[index].coverage = grown
 
     ## Whether `dab` reaches the cell whose top-left is (`origin_x`, `origin_y`).
-    func reaches(dab: Dab, origin_x: f64, origin_y: f64) -> bool:
+    static func reaches(dab: Dab, origin_x: f64, origin_y: f64) -> bool:
         return dab.x + dab.extent + 1.0 >= origin_x and dab.x - dab.extent - 1.0 < origin_x + (f64)tile_size and dab.y + dab.extent + 1.0 >= origin_y and dab.y - dab.extent - 1.0 < origin_y + (f64)tile_size
 
     ## Whether dabs set their own ceilings (opacity dynamics): then the

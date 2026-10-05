@@ -40,7 +40,7 @@ pub struct WarpQueue:
     var starved_ns: u64
 
     ## An empty queue, on the heap so its address holds while the worker runs.
-    pub func create() -> WarpQueue*!:
+    pub static func create() -> WarpQueue*!:
         let points = try new f64[64] --- in memory.heap
         errdefer free(points) in memory.heap
         var mutex: sync.Mutex
@@ -50,7 +50,7 @@ pub struct WarpQueue:
                                  dabs = 0, dab_ns = 0, starved_ns = 0) in memory.heap
 
     ## Free a queue whose worker has returned.
-    pub func destroy(queue: WarpQueue*):
+    pub static func destroy(queue: WarpQueue*):
         free(queue.points) in memory.heap
         free(queue) in memory.heap
 

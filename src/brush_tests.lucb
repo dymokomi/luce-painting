@@ -18,7 +18,7 @@ struct Bench:
     var painter: Painter
     var pixels: f32[]
 
-    func open() -> Bench?!:
+    static func open() -> Bench?!:
         var device = gpu.Device.open() catch failure:
             assert(failure.code == gpu.unavailable)
             return none

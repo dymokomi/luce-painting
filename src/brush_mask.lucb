@@ -18,7 +18,7 @@ pub struct BrushMask:
     var shown: u8[]
     var closed: bool
 
-    func own(width: usize, height: usize) -> interop.Reference[BrushMask]!:
+    static func own(width: usize, height: usize) -> interop.Reference[BrushMask]!:
         if width < 1 or height < 1 or width > brush_image_limit or height > brush_image_limit:
             error(invalid, "a brush mask is 1..1024 pixels a side")
         var reservation = try interop.Reservation[BrushMask](brush_mask_type)
@@ -31,7 +31,7 @@ pub struct BrushMask:
         return reservation.publish(native, memory.heap)
 
     ## An empty mask, `width` × `height` (1..1024 each): nothing paints.
-    pub func create(width: i64 = 256, height: i64 = 256) -> interop.Reference[BrushMask]!:
+    pub static func create(width: i64 = 256, height: i64 = 256) -> interop.Reference[BrushMask]!:
         if width < 1 or height < 1:
             error(invalid, "a brush mask is 1..1024 pixels a side")
         return try BrushMask.own((usize)width, (usize)height)
@@ -39,7 +39,7 @@ pub struct BrushMask:
     ## A mask of a picture's 8-bit RGBA pixels (`width` × `height`), dark
     ## (and opaque) where it paints, at its size scaled down to fit 1024
     ## pixels a side.
-    pub func from_rgba8(rgba: const u8[], width: usize, height: usize) -> interop.Reference[BrushMask]!:
+    pub static func from_rgba8(rgba: const u8[], width: usize, height: usize) -> interop.Reference[BrushMask]!:
         if width == 0 or height == 0:
             error(invalid, "the image is empty")
         let scale = math.min(1.0, (f64)brush_image_limit / (f64)(width if width > height else height))
@@ -51,7 +51,7 @@ pub struct BrushMask:
     ## A mask of coverage bytes (`width` × `height`, 255 paints), as brush
     ## files keep tips and textures, box-filtered down to fit 1024 pixels a
     ## side when larger.
-    pub func from_coverage(coverage: const u8[], width: usize, height: usize) -> interop.Reference[BrushMask]!:
+    pub static func from_coverage(coverage: const u8[], width: usize, height: usize) -> interop.Reference[BrushMask]!:
         if width == 0 or height == 0 or coverage.length < width * height:
             error(invalid, "the coverage does not fill its size")
         let scale = math.min(1.0, (f64)brush_image_limit / (f64)(width if width > height else height))
