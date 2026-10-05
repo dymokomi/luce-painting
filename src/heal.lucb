@@ -46,7 +46,7 @@ pub func heal(pixels: f32[], width: usize, height: usize, painted: const u8[]) -
     let box_bottom = min_usize(height, bottom + band)
     let box_width = box_right - box_left
     let box_height = box_bottom - box_top
-    let roles = try alloc u8[box_width * box_height] in memory.heap
+    let roles = try new u8[box_width * box_height] --- in memory.heap
     defer free(roles) in memory.heap
     try mark_roles(roles, painted, width, box_left, box_top, box_width, box_height, band)
     # The best shift of the ring onto itself, then refined.
@@ -78,7 +78,7 @@ pub func heal(pixels: f32[], width: usize, height: usize, painted: const u8[]) -
                     best_x = center_x + rx
                     best_y = center_y + ry
     # The membrane: on the ring, target minus source; solved over the hole.
-    let values = try alloc f32[box_width * box_height * 4] in memory.heap
+    let values = try new f32[box_width * box_height * 4] --- in memory.heap
     defer free(values) in memory.heap
     var sum: f64[4] = [0.0, 0.0, 0.0, 0.0]
     var ring_count = 0.0
@@ -124,7 +124,7 @@ pub func heal(pixels: f32[], width: usize, height: usize, painted: const u8[]) -
 ## square dilation `band` wide, by prefix sums), or outside both.
 func mark_roles(roles: u8[], painted: const u8[], width: usize, left: usize, top: usize, box_width: usize, box_height: usize, band: usize) -> !:
     let stride = box_width + 1
-    let sums = try alloc u32[stride * (box_height + 1)] in memory.heap
+    let sums = try new u32[stride * (box_height + 1)] --- in memory.heap
     defer free(sums) in memory.heap
     for index in 0..<sums.length:
         sums[index] = 0
@@ -213,9 +213,9 @@ func clamp_usize(value: usize, low: usize, high: usize) -> usize:
 test "a spot on a gradient heals to the gradient, texture from beside it":
     let width: usize = 96
     let height: usize = 64
-    let pixels = try alloc f32[width * height * 4] in memory.heap
+    let pixels = try new f32[width * height * 4] --- in memory.heap
     defer free(pixels) in memory.heap
-    let painted = try alloc u8[width * height] in memory.heap
+    let painted = try new u8[width * height] --- in memory.heap
     defer free(painted) in memory.heap
     # A horizontal gray ramp, opaque, with a black blotch in the middle painted over.
     for y in 0..<height:

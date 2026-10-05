@@ -18,7 +18,7 @@ struct Bench:
     var painter: Painter
     var pixels: f32[]
 
-    static func open() -> Bench?!:
+    func open() -> Bench?!:
         var device = gpu.Device.open() catch failure:
             assert(failure.code == gpu.unavailable)
             return none
@@ -27,20 +27,20 @@ struct Bench:
         errdefer tiles.destroy()
         var painter = try Painter.create(device)
         errdefer painter.destroy()
-        let pixels = try alloc f32[(usize)128 * 128 * 4] in memory.heap
+        let pixels = try new f32[(usize)128 * 128 * 4] --- in memory.heap
         return Bench(device = device, tiles = tiles, painter = painter, pixels = pixels)
 
     ## What a stroke paints: the tiles, nothing selected, colors mixed encoded.
-    mutating func target() -> PaintTarget:
+    func target() -> PaintTarget:
         return PaintTarget(tiles = &self.tiles, mixing = Mixing(srgb = true, mask = false))
 
     ## One dab of `brush` at (`x`, `y`) with `pen`, through `images`, then the pixels.
-    mutating func dab(brush: Brush, x: f64, y: f64, pen: Pen = Pen(), images: BrushImages*? = none) -> !:
+    func dab(brush: Brush, x: f64, y: f64, pen: Pen = Pen(), images: BrushImages*? = none) -> !:
         var stroke = try Stroke.begin(&self.painter, self.target(), brush, x, y, pen = pen, images = images)
         stroke.finish()
         try self.read()
 
-    mutating func read() -> !:
+    func read() -> !:
         try self.tiles.read(self.pixels)
 
     ## The alpha at (`x`, `y`).
@@ -55,7 +55,7 @@ struct Bench:
                 count += 1
         return count
 
-    mutating func close():
+    func close():
         free(self.pixels) in memory.heap
         self.painter.destroy()
         self.tiles.destroy()
@@ -114,7 +114,7 @@ test "a sampled tip paints its image, turned and fitted to the dab":
     var images = BrushImages()
     defer images.destroy()
     # The tip's left half paints, its right half does not.
-    let tip = try alloc u8[(usize)64 * 64] in memory.heap
+    let tip = try new u8[(usize)64 * 64] --- in memory.heap
     defer free(tip) in memory.heap
     for y in 0..<64:
         for x in 0..<64:
@@ -143,7 +143,7 @@ test "a texture image multiplies into each dab by its depth, tiled in document s
     var images = BrushImages()
     defer images.destroy()
     # Stripes four pixels wide: painting, then not.
-    let stripes = try alloc u8[(usize)8 * 8] in memory.heap
+    let stripes = try new u8[(usize)8 * 8] --- in memory.heap
     defer free(stripes) in memory.heap
     for y in 0..<8:
         for x in 0..<8:

@@ -18,12 +18,12 @@ pub struct BrushMask:
     var shown: u8[]
     var closed: bool
 
-    static func own(width: usize, height: usize) -> interop.Reference[BrushMask]!:
+    func own(width: usize, height: usize) -> interop.Reference[BrushMask]!:
         if width < 1 or height < 1 or width > brush_image_limit or height > brush_image_limit:
             error(invalid, "a brush mask is 1..1024 pixels a side")
         var reservation = try interop.Reservation[BrushMask](brush_mask_type)
         errdefer reservation.cancel()
-        let pixels = try alloc u8[width * height] in memory.heap
+        let pixels = try new u8[width * height] --- in memory.heap
         errdefer free(pixels) in memory.heap
         for index in 0..<pixels.length:
             pixels[index] = 0
@@ -31,7 +31,7 @@ pub struct BrushMask:
         return reservation.publish(native, memory.heap)
 
     ## An empty mask, `width` × `height` (1..1024 each): nothing paints.
-    pub static func create(width: i64 = 256, height: i64 = 256) -> interop.Reference[BrushMask]!:
+    pub func create(width: i64 = 256, height: i64 = 256) -> interop.Reference[BrushMask]!:
         if width < 1 or height < 1:
             error(invalid, "a brush mask is 1..1024 pixels a side")
         return try BrushMask.own((usize)width, (usize)height)
@@ -39,7 +39,7 @@ pub struct BrushMask:
     ## A mask of a picture's 8-bit RGBA pixels (`width` × `height`), dark
     ## (and opaque) where it paints, at its size scaled down to fit 1024
     ## pixels a side.
-    pub static func from_rgba8(rgba: const u8[], width: usize, height: usize) -> interop.Reference[BrushMask]!:
+    pub func from_rgba8(rgba: const u8[], width: usize, height: usize) -> interop.Reference[BrushMask]!:
         if width == 0 or height == 0:
             error(invalid, "the image is empty")
         let scale = math.min(1.0, (f64)brush_image_limit / (f64)(width if width > height else height))
@@ -51,7 +51,7 @@ pub struct BrushMask:
     ## A mask of coverage bytes (`width` × `height`, 255 paints), as brush
     ## files keep tips and textures, box-filtered down to fit 1024 pixels a
     ## side when larger.
-    pub static func from_coverage(coverage: const u8[], width: usize, height: usize) -> interop.Reference[BrushMask]!:
+    pub func from_coverage(coverage: const u8[], width: usize, height: usize) -> interop.Reference[BrushMask]!:
         if width == 0 or height == 0 or coverage.length < width * height:
             error(invalid, "the coverage does not fill its size")
         let scale = math.min(1.0, (f64)brush_image_limit / (f64)(width if width > height else height))
@@ -107,7 +107,7 @@ pub struct BrushMask:
 
     ## Take a picture's 8-bit RGBA pixels in, fitted inside the mask with its
     ## aspect kept and centred; what it does not cover paints nothing.
-    pub mutating func draw_rgba8(rgba: const u8[], width: usize, height: usize) -> !:
+    pub func draw_rgba8(rgba: const u8[], width: usize, height: usize) -> !:
         try self.require_open()
         if width == 0 or height == 0 or rgba.length < width * height * 4:
             error(invalid, "the picture's pixels do not fill its size")
@@ -126,7 +126,7 @@ pub struct BrushMask:
     ## Paint a soft round dab at (`x`, `y`) mask pixels, `radius` across its
     ## half, `hardness` 0..1, bringing the coverage towards `value` (0 erases,
     ## 1 paints) by the dab's own.
-    pub mutating func dab(x: f64, y: f64, radius: f64, hardness: f64, value: f64) -> !:
+    pub func dab(x: f64, y: f64, radius: f64, hardness: f64, value: f64) -> !:
         try self.require_open()
         if not math.is_finite(x) or not math.is_finite(y) or not (radius > 0.0) or radius > 4096.0:
             error(invalid, "a dab needs a finite place and a radius 0..4096")
@@ -156,7 +156,7 @@ pub struct BrushMask:
     ## `roundness` (minor over major axis) turned by `angle` degrees, with the
     ## dab shader's hard core of `hardness` and soft edge. Shows a brush with no
     ## sampled tip, and is where painting one starts from.
-    pub mutating func draw_round(hardness: f64, angle: f64, roundness: f64) -> !:
+    pub func draw_round(hardness: f64, angle: f64, roundness: f64) -> !:
         try self.require_open()
         let radius = (f64)(self.columns if self.columns < self.rows else self.rows) * 0.5 - 1.0
         let core = radius * math.clamp(hardness, 0.0, 1.0)
@@ -176,7 +176,7 @@ pub struct BrushMask:
 
     ## Dabs from (`x0`, `y0`) to (`x1`, `y1`), a quarter radius apart, the
     ## first included: a drag's segment.
-    pub mutating func line(x0: f64, y0: f64, x1: f64, y1: f64, radius: f64, hardness: f64, value: f64) -> !:
+    pub func line(x0: f64, y0: f64, x1: f64, y1: f64, radius: f64, hardness: f64, value: f64) -> !:
         let dx = x1 - x0
         let dy = y1 - y0
         let length = math.sqrt(dx * dx + dy * dy)
@@ -188,21 +188,21 @@ pub struct BrushMask:
             along += step
 
     ## Nothing paints (or, `value` 1, everything does).
-    pub mutating func clear(value: f64 = 0.0) -> !:
+    pub func clear(value: f64 = 0.0) -> !:
         try self.require_open()
         let byte = (u8)math.round(math.clamp(value, 0.0, 1.0) * 255.0)
         for index in 0..<self.pixels.length:
             self.pixels[index] = byte
 
     ## Paint where it did not, and not where it did.
-    pub mutating func invert() -> !:
+    pub func invert() -> !:
         try self.require_open()
         for index in 0..<self.pixels.length:
             self.pixels[index] = 255 - self.pixels[index]
 
     ## The mask as RGBA to show, `size` × `size` (the mask fitted and centred
     ## on white): black ink where it paints.
-    pub mutating func preview(size: i64) -> const u8[]!:
+    pub func preview(size: i64) -> const u8[]!:
         try self.require_open()
         try self.show_buffer(size, size)
         let side = (usize)size
@@ -224,12 +224,12 @@ pub struct BrushMask:
     ## and back as a pen's press would when `taper` < 1. The tip is this mask,
     ## or with `round` the round tip at `hardness`; `angle` and `roundness` as
     ## the brush's; dabs every `spacing` of the diameter.
-    pub mutating func stroke_preview(width: i64, height: i64, round: bool, diameter: f64, hardness: f64, spacing: f64, angle: f64, roundness: f64, taper: f64 = 1.0) -> const u8[]!:
+    pub func stroke_preview(width: i64, height: i64, round: bool, diameter: f64, hardness: f64, spacing: f64, angle: f64, roundness: f64, taper: f64 = 1.0) -> const u8[]!:
         try self.require_open()
         try self.show_buffer(width, height)
         let w = (usize)width
         let h = (usize)height
-        var ink = try alloc f64[w * h] in memory.heap
+        var ink = try new f64[w * h] --- in memory.heap
         defer free(ink) in memory.heap
         for index in 0..<ink.length:
             ink[index] = 0.0
@@ -280,7 +280,7 @@ pub struct BrushMask:
             y += 1
 
     ## The shown buffer at `width` × `height` RGBA, 1..1024 a side.
-    mutating func show_buffer(width: i64, height: i64) -> !:
+    func show_buffer(width: i64, height: i64) -> !:
         if width < 1 or height < 1 or width > 1024 or height > 1024:
             error(invalid, "a brush preview is 1..1024 pixels a side")
         let bytes = (usize)width * (usize)height * 4
@@ -289,13 +289,13 @@ pub struct BrushMask:
                 free(self.shown) in memory.heap
             var none_shown: u8[]
             self.shown = none_shown
-            self.shown = try alloc u8[bytes] in memory.heap
+            self.shown = try new u8[bytes] --- in memory.heap
 
     func require_open() -> !:
         if self.closed:
             error(invalid, "the brush mask is closed")
 
-    pub mutating func close():
+    pub func close():
         if self.closed:
             return
         self.closed = true
@@ -409,7 +409,7 @@ test "coverage becomes a mask as is, or box-filtered down to fit":
     let exact = try BrushMask.from_coverage(small[..<6], 3, 2)
     defer exact.release()
     assert((try exact.value().width()) == 3 and (try exact.value().coverage())[1] == 255)
-    let wide = try alloc u8[2048 * 4] in memory.heap
+    let wide = try new u8[2048 * 4] --- in memory.heap
     defer free(wide) in memory.heap
     for index in 0..<wide.length:
         wide[index] = 255 if index % 2 == 0 else 0

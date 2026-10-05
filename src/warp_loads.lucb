@@ -51,19 +51,19 @@ pub struct CellLoader:
     pub var encoded: f32[]
 
     ## A loader for `count` cells, `columns` a row.
-    pub static func create(count: usize, columns: usize) -> CellLoader!:
-        let requested = try alloc bool[count] in memory.heap
+    pub func create(count: usize, columns: usize) -> CellLoader!:
+        let requested = try new bool[count] --- in memory.heap
         errdefer free(requested) in memory.heap
         for index in 0..<count:
             requested[index] = false
-        let wanted = try alloc u32[64] in memory.heap
+        let wanted = try new u32[64] --- in memory.heap
         errdefer free(wanted) in memory.heap
-        let placed = try alloc Placed[64] in memory.heap
+        let placed = try new Placed[64] --- in memory.heap
         var linear: f32[]
         return CellLoader(columns = columns, requested = requested, wanted = wanted, wanted_head = 0, wanted_count = 0,
                           batch = gpu.ReadBatch(), sent = false, placed = placed, placed_count = 0, encoded = linear)
 
-    pub mutating func destroy():
+    pub func destroy():
         if self.sent:
             self.batch.finish()
             self.sent = false
@@ -76,16 +76,16 @@ pub struct CellLoader:
         return self.requested[index]
 
     ## Cell `index` is in hand without a read (read in directly).
-    pub mutating func have(index: usize):
+    pub func have(index: usize):
         self.requested[index] = true
 
     ## Ask for cell `index`, once.
-    pub mutating func request(index: usize) -> !:
+    pub func request(index: usize) -> !:
         if self.requested[index]:
             return
         self.requested[index] = true
         if self.wanted_count == self.wanted.length:
-            let grown = try alloc u32[self.wanted.length * 2] in memory.heap
+            let grown = try new u32[self.wanted.length * 2] --- in memory.heap
             for at in 0..<self.wanted_count:
                 grown[at] = self.wanted[(self.wanted_head + at) % self.wanted.length]
             free(self.wanted) in memory.heap
@@ -100,7 +100,7 @@ pub struct CellLoader:
 
     ## Send what was asked for as one batch, unless one is on the GPU already.
     ## A cell with no tile needs no read: `visit` has it at once, with no bytes.
-    pub mutating func start(source: const Tiles*, context: void*?, visit: CellVisit) -> !:
+    pub func start(source: const Tiles*, context: void*?, visit: CellVisit) -> !:
         if self.sent or self.wanted_count == 0:
             return
         var batch = try gpu.ReadBatch.begin(source.device())
@@ -119,18 +119,18 @@ pub struct CellLoader:
                 let offset = reserved else trap("reserved")
                 try batch.copy(texture, gpu.Region(0, 0, tile_size, area.height), offset)
                 if count == self.placed.length:
-                    let grown = try alloc Placed[self.placed.length * 2] in memory.heap
+                    let grown = try new Placed[self.placed.length * 2] --- in memory.heap
                     memory.copy(grown, self.placed, count)
                     free(self.placed) in memory.heap
                     self.placed = grown
                 self.placed[count] = Placed(index = (u32)index, offset = offset, rows = area.height, columns = area.width)
                 count += 1
             else:
-                let clear = try alloc f32[cell_samples] in memory.heap
+                let clear = try new f32[cell_samples] --- in memory.heap
                 errdefer free(clear) in memory.heap
                 for at in 0..<clear.length:
                     clear[at] = 0.0
-                let none_there = try alloc u8[cell_bytes] in memory.heap
+                let none_there = try new u8[cell_bytes] --- in memory.heap
                 memory.set(none_there, 0)
                 try visit(context, index, clear, none_there)
             self.wanted_head = (self.wanted_head + 1) % self.wanted.length
@@ -146,7 +146,7 @@ pub struct CellLoader:
     ## Hand the cells of the batch on the GPU to `visit` once it is done: at
     ## once when `block`, else only if the GPU has finished it. Whether a batch
     ## was handed over.
-    pub mutating func poll(block: bool, context: void*?, visit: CellVisit) -> bool!:
+    pub func poll(block: bool, context: void*?, visit: CellVisit) -> bool!:
         if not self.sent:
             return false
         if block:
@@ -155,17 +155,17 @@ pub struct CellLoader:
             return false
         # Every cell's samples, made across the processors, then handed over.
         let count = self.placed_count
-        let made = try alloc Unpack[count] in memory.heap
+        let made = try new Unpack[count] --- in memory.heap
         defer free(made) in memory.heap
         var allocated: usize = 0
         for at in 0..<count:
             let place = self.placed[at]
-            let pixels = alloc f32[cell_samples] in memory.heap catch failure:
+            let pixels = new f32[cell_samples] --- in memory.heap catch failure:
                 for other in 0..<allocated:
                     free(made[other].pixels) in memory.heap
                     free(made[other].halves) in memory.heap
                 error(failure.code, failure.message)
-            let halves = alloc u8[cell_bytes] in memory.heap catch failure:
+            let halves = new u8[cell_bytes] --- in memory.heap catch failure:
                 free(pixels) in memory.heap
                 for other in 0..<allocated:
                     free(made[other].pixels) in memory.heap

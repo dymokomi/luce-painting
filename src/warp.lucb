@@ -95,8 +95,8 @@ pub struct WarpStroke:
     ## Begin on `tiles` (straight alpha) at (`x`, `y`): `diameter`, `hardness`
     ## (at most 0.98), `strength` (0.01..1) and smudge's `spacing` (a fraction
     ## of the diameter); `srgb` mixes the colors as sRGB-encoded values.
-    pub static func begin(tiles: const Tiles*, x: f64, y: f64, diameter: f64, hardness: f64, strength: f64, spacing: f64 = default_smudge_spacing,
-                          srgb: bool = false) -> WarpStroke!:
+    pub func begin(tiles: const Tiles*, x: f64, y: f64, diameter: f64, hardness: f64, strength: f64, spacing: f64 = default_smudge_spacing,
+                   srgb: bool = false) -> WarpStroke!:
         if not math.is_finite(x) or not math.is_finite(y) or not (diameter >= 1.0 and diameter <= 5000.0):
             error(invalid, "a warp stroke needs a finite point and a diameter of 1..5000")
         if not (spacing >= 0.01 and spacing <= 5.0):
@@ -106,15 +106,15 @@ pub struct WarpStroke:
         var source = try tiles.clone()
         errdefer source.destroy()
         let count = (usize)tiles.columns() * (usize)tiles.rows()
-        let cells = try alloc WarpCell*?[count] in memory.heap
+        let cells = try new WarpCell*?[count] --- in memory.heap
         errdefer free(cells) in memory.heap
         for index in 0..<count:
             cells[index] = none
         let radius = math.max(1.0, diameter * 0.5)
         let side = (usize)(math.ceil(radius) * 2.0 + 1.0)
-        let carried = try alloc f32[side * side * 4] in memory.heap
+        let carried = try new f32[side * side * 4] --- in memory.heap
         errdefer free(carried) in memory.heap
-        let weights = try alloc f32[side * side] in memory.heap
+        let weights = try new f32[side * side] --- in memory.heap
         errdefer free(weights) in memory.heap
         var loader = try CellLoader.create(count, (usize)tiles.columns())
         errdefer loader.destroy()
@@ -140,7 +140,7 @@ pub struct WarpStroke:
         return stroke
 
     ## Continue to (`x`, `y`) here and now, a dab every spacing along the way.
-    pub mutating func extend(x: f64, y: f64) -> !:
+    pub func extend(x: f64, y: f64) -> !:
         if not math.is_finite(x) or not math.is_finite(y):
             error(invalid, "stroke coordinates must be finite")
         try self.load_segment(self.last_x, self.last_y, x, y)
@@ -152,14 +152,14 @@ pub struct WarpStroke:
 
     ## Read in every cell a dab on the segment from (`x0`, `y0`) to (`x1`,
     ## `y1`) can reach.
-    mutating func load_segment(x0: f64, y0: f64, x1: f64, y1: f64) -> !:
+    func load_segment(x0: f64, y0: f64, x1: f64, y1: f64) -> !:
         let margin = (i64)math.ceil(self.radius) + 2
         try self.load((i64)math.floor(math.min(x0, x1)) - margin, (i64)math.floor(math.min(y0, y1)) - margin,
                       (i64)math.ceil(math.max(x0, x1)) + margin, (i64)math.ceil(math.max(y0, y1)) + margin)
 
     ## The dabs from the last point to (`x`, `y`), on cells already read in:
     ## no GPU work, so it runs on the worker as well as here.
-    mutating func walk(x: f64, y: f64) -> !:
+    func walk(x: f64, y: f64) -> !:
         let dx = x - self.last_x
         let dy = y - self.last_y
         let length = math.sqrt(dx * dx + dy * dy)
@@ -182,7 +182,7 @@ pub struct WarpStroke:
     ## (0: no limit) spent, the cells not yet sent keep their rows for the next
     ## frame. A cell the worker is writing meanwhile goes up as it is, and again
     ## once its dab is done.
-    pub mutating func flush(tiles: Tiles*, budget: u64 = 0) -> usize!:
+    pub func flush(tiles: Tiles*, budget: u64 = 0) -> usize!:
         let started = time.now()
         var dirty: i64[4] = [self.dirty_left, self.dirty_top, self.dirty_right, self.dirty_bottom]
         if let queue = self.queue:
@@ -234,7 +234,7 @@ pub struct WarpStroke:
         return sent
 
     ## A cell's changed rows, taken: none are left marked.
-    mutating func take_rows(cell: WarpCell*) -> u32[2]:
+    func take_rows(cell: WarpCell*) -> u32[2]:
         if let queue = self.queue:
             queue.lock()
             let taken: u32[2] = [cell.top, cell.bottom]
@@ -249,7 +249,7 @@ pub struct WarpStroke:
 
     ## Mark cells `dirty` (first and last column and row) changed again: their
     ## rows were not all sent.
-    mutating func remark(dirty: i64[4]):
+    func remark(dirty: i64[4]):
         if let queue = self.queue:
             queue.mark_dirty(dirty[0], dirty[1], dirty[2], dirty[3])
             return
@@ -268,7 +268,7 @@ pub struct WarpStroke:
 
     ## Walk the path on a worker thread from here on. The stroke must stay at
     ## this address until `wait` or `destroy`.
-    pub mutating func start_async() -> !:
+    pub func start_async() -> !:
         let queue = try WarpQueue.create()
         self.queue = queue
         self.queued_x = self.last_x
@@ -281,7 +281,7 @@ pub struct WarpStroke:
     ## Record (`x`, `y`) for the worker, asking for the cells its dabs reach
     ## (and, ahead, those a segment as long again in the same direction would):
     ## their reads start now and nothing here waits for them.
-    pub mutating func record(x: f64, y: f64) -> !:
+    pub func record(x: f64, y: f64) -> !:
         if not math.is_finite(x) or not math.is_finite(y):
             error(invalid, "stroke coordinates must be finite")
         let queue = self.queue else error(invalid, "the stroke does not walk on a worker")
@@ -295,18 +295,18 @@ pub struct WarpStroke:
     ## Once a frame on the main thread: hand the worker the cells whose reads
     ## are done and send the next ones. `block` waits for every read asked for,
     ## as ending the stroke must before it waits for the worker.
-    pub mutating func service(block: bool) -> !:
+    pub func service(block: bool) -> !:
         if block:
             while not self.loader.idle():
                 try self.loader.start(&self.source, (void*)&self, install_cell)
-                discard(try self.loader.poll(true, (void*)&self, install_cell))
+                _ = try self.loader.poll(true, (void*)&self, install_cell)
             return
         if try self.loader.poll(false, (void*)&self, install_cell):
             try self.loader.start(&self.source, (void*)&self, install_cell)
 
     ## Ask for every cell a dab on the segment from (`x0`, `y0`) to (`x1`, `y1`)
     ## can reach that is not in the working copy.
-    mutating func request_segment(x0: f64, y0: f64, x1: f64, y1: f64) -> !:
+    func request_segment(x0: f64, y0: f64, x1: f64, y1: f64) -> !:
         let span = self.segment_cells(x0, y0, x1, y1) else return
         for row in span[1]..<span[3] + 1:
             for column in span[0]..<span[2] + 1:
@@ -329,7 +329,7 @@ pub struct WarpStroke:
 
     ## On the worker: wait until every cell the segment to (`x`, `y`) needs is
     ## in the working copy; false when the stroke is stopping meanwhile.
-    mutating func await_segment(x: f64, y: f64) -> bool:
+    func await_segment(x: f64, y: f64) -> bool:
         let queue = self.queue else return true
         let span = self.segment_cells(self.last_x, self.last_y, x, y) else return true
         let started = time.now()
@@ -353,18 +353,18 @@ pub struct WarpStroke:
         return true
 
     ## No more points: the worker walks the rest of the path and returns.
-    pub mutating func end_path():
+    pub func end_path():
         if let queue = self.queue:
             queue.end()
 
     ## The worker's dabs, their nanoseconds and its nanoseconds waiting for
     ## cells since the last call (zeros without a worker).
-    pub mutating func worker_stats() -> u64[3]:
+    pub func worker_stats() -> u64[3]:
         let queue = self.queue else return [0, 0, 0]
         return queue.take_dabs()
 
     ## The points recorded and not yet walked to.
-    pub mutating func depth() -> usize:
+    pub func depth() -> usize:
         let queue = self.queue else return 0
         return queue.depth()
 
@@ -373,12 +373,12 @@ pub struct WarpStroke:
         return self.queue != none
 
     ## Whether the path is walked (always, without a worker).
-    pub mutating func finished() -> bool:
+    pub func finished() -> bool:
         let queue = self.queue else return true
         return queue.finished()
 
     ## Wait for the worker to walk the rest of the path and return.
-    pub mutating func wait() -> !:
+    pub func wait() -> !:
         let queue = self.queue else return
         # Every cell the worker still needs was asked for: read it all in, so
         # the worker never waits for a read nobody will hand over.
@@ -391,18 +391,18 @@ pub struct WarpStroke:
 
     ## Join the worker once: the handle is let go first, so a later `destroy`
     ## after `wait` does not join a thread already gone (glibc faults on that).
-    mutating func join() -> !:
+    func join() -> !:
         if let handle = self.worker:
             self.worker = none
             try handle.join()
 
-    pub mutating func destroy():
+    pub func destroy():
         # A worker still walking stops after its dab, then goes.
         if let queue = self.queue:
             queue.stop()
             queue.wait()
             self.join() catch failure:
-                discard(failure)
+                _ = failure
             WarpQueue.destroy(queue)
             self.queue = none
             self.worker = none
@@ -435,7 +435,7 @@ pub struct WarpStroke:
         return t * t * (3.0 - 2.0 * t)
 
     ## Smudge: the square under the first dab, carried.
-    mutating func pick_up(x: f64, y: f64) -> !:
+    func pick_up(x: f64, y: f64) -> !:
         let reach = (i64)math.ceil(self.radius)
         let side = reach * 2 + 1
         let cx = (i64)math.round(x)
@@ -447,7 +447,7 @@ pub struct WarpStroke:
                 for channel in 0..<(usize)4:
                     self.carried[at + channel] = self.pixel(cx - reach + i, cy - reach + j, channel)
 
-    mutating func smudge(x: f64, y: f64) -> !:
+    func smudge(x: f64, y: f64) -> !:
         let reach = (i64)math.ceil(self.radius)
         let side = reach * 2 + 1
         let cx = (i64)math.round(x)
@@ -472,7 +472,7 @@ pub struct WarpStroke:
 
     ## Read in, premultiplied, every cell over document pixels `left`..`right`,
     ## `top`..`bottom` that is not yet in the working copy.
-    mutating func load(left: i64, top: i64, right: i64, bottom: i64) -> !:
+    func load(left: i64, top: i64, right: i64, bottom: i64) -> !:
         let rows = (i64)self.cells.length // (i64)self.columns
         let first_column = math.imax(0, left // (i64)tile_size)
         let first_row = math.imax(0, top // (i64)tile_size)
@@ -481,7 +481,7 @@ pub struct WarpStroke:
         if last_column < first_column or last_row < first_row:
             return
         # The cells not yet read, read back together.
-        let wanted = try alloc Cell[(usize)((last_column - first_column + 1) * (last_row - first_row + 1))] in memory.heap
+        let wanted = try new Cell[(usize)((last_column - first_column + 1) * (last_row - first_row + 1))] --- in memory.heap
         defer free(wanted) in memory.heap
         var count: usize = 0
         var row = first_row
@@ -497,7 +497,7 @@ pub struct WarpStroke:
 
     ## Mark the cells a dab over document pixels `left`..`right`, `top`..`bottom`
     ## reached: in the shared queue when a worker walks.
-    mutating func touch(left: i64, top: i64, right: i64, bottom: i64):
+    func touch(left: i64, top: i64, right: i64, bottom: i64):
         let columns = ((i64)self.width + (i64)tile_size - 1) // (i64)tile_size
         let rows = ((i64)self.height + (i64)tile_size - 1) // (i64)tile_size
         let first_column = math.imax(0, left // (i64)tile_size)
@@ -527,7 +527,7 @@ pub struct WarpStroke:
     ## Grow each loaded cell's changed rows by document rows `top`..`bottom`
     ## (inclusive), over the cells `first_column`..`last_column`,
     ## `first_row`..`last_row`. With the queue's lock held when a worker walks.
-    mutating func mark_rows(top: i64, bottom: i64, first_column: i64, first_row: i64, last_column: i64, last_row: i64):
+    func mark_rows(top: i64, bottom: i64, first_column: i64, first_row: i64, last_column: i64, last_row: i64):
         var row = first_row
         while row <= last_row:
             let cell_top = row * (i64)tile_size
@@ -643,7 +643,7 @@ func warp_worker(context: void*?):
         if not stroke.await_segment(point[0], point[1]):
             break
         stroke.walk(point[0], point[1]) catch failure:
-            discard(failure)
+            _ = failure
             failed = true
             break
     queue.finish(failed)
@@ -651,9 +651,9 @@ func warp_worker(context: void*?):
 ## `WarpStroke.load`'s visitor: a cell read back, premultiplied, into the working copy.
 func load_cell(context: void*?, cell: Cell, bytes: const u8[]) -> !:
     let stroke = (WarpStroke*)(context else trap("a warp load lost its stroke"))
-    let pixels = try alloc f32[cell_samples] in memory.heap
+    let pixels = try new f32[cell_samples] --- in memory.heap
     errdefer free(pixels) in memory.heap
-    let halves = try alloc u8[cell_bytes] in memory.heap
+    let halves = try new u8[cell_bytes] --- in memory.heap
     errdefer free(halves) in memory.heap
     unpack_cell(bytes, (usize)stroke.source.region(cell.column, cell.row).width, pixels, halves, stroke.loader.encoded)
     let index = (usize)cell.row * stroke.columns + (usize)cell.column
@@ -684,7 +684,7 @@ test "smudge carries the color under its first dab along its path, walked here o
     # Red on the left half of a 256 × 64 layer, nothing on the right.
     let width: usize = 256
     let height: usize = 64
-    let pixels = try alloc f32[width * height * 4] in memory.heap
+    let pixels = try new f32[width * height * 4] --- in memory.heap
     defer free(pixels) in memory.heap
     var results: f32[2]
     for walk in 0..<(usize)2:
@@ -708,7 +708,7 @@ test "smudge carries the color under its first dab along its path, walked here o
             try stroke.wait()
         else:
             try stroke.extend(200.0, 32.0)
-        discard(try stroke.flush(&tiles))
+        _ = try stroke.flush(&tiles)
         try tiles.read(pixels)
         # Red is carried into the empty half as far as the last dab reaches, and no further.
         let near = pixels[(32 * width + 150) * 4 + 3]

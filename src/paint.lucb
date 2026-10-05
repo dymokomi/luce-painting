@@ -98,7 +98,7 @@ pub struct Painter:
     pub var black: gpu.Texture
     pub var clear: gpu.Texture
 
-    pub static func create(device: gpu.Device) -> Painter!:
+    pub func create(device: gpu.Device) -> Painter!:
         var dab_shader = try gpu.Shader.create(device, dab_frag_words, dab_frag_msl)
         errdefer dab_shader.destroy()
         var paint_shader = try gpu.Shader.create(device, paint_frag_words, paint_frag_msl)
@@ -139,7 +139,7 @@ pub struct Painter:
     pub func paint_pipeline() -> gpu.Pipeline:
         return self.paint
 
-    pub mutating func destroy():
+    pub func destroy():
         self.clear.destroy()
         self.black.destroy()
         self.white.destroy()
@@ -171,4 +171,4 @@ pub func gradient_tile(painter: const Painter*, fresh: gpu.Texture*, source: gpu
     defer area.release()
     try gpu.shade(area.value(), painter.gradient, gpu.Rect(width = (f64)tile_size, height = (f64)tile_size), u8[]((u8*)&params[0], 80),
                   [source, clip], gpu.Filter.nearest)
-    discard(try frame.value().present(gpu.Color(0.0, 0.0, 0.0, 0.0)))
+    _ = try frame.value().present(gpu.Color(0.0, 0.0, 0.0, 0.0))

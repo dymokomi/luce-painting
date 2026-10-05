@@ -146,7 +146,7 @@ pub struct Stroke:
     ## `on_mask`), painting the first dab there. A mask's missing cells count as
     ## white (revealing). The tip and texture come from `images` (none: round,
     ## untextured); they must stay while the stroke lasts.
-    pub static func begin(painter: Painter*, target: PaintTarget, brush: Brush, x: f64, y: f64, on_mask: bool = false, pen: Pen = Pen(), images: BrushImages*? = none) -> Stroke!:
+    pub func begin(painter: Painter*, target: PaintTarget, brush: Brush, x: f64, y: f64, on_mask: bool = false, pen: Pen = Pen(), images: BrushImages*? = none) -> Stroke!:
         try brush.check()
         let tiles = target.tiles
         if not math.is_finite(x) or not math.is_finite(y):
@@ -166,7 +166,7 @@ pub struct Stroke:
         stroke.random = 0x9E3779B97F4A7C15 ^ ((u64)(i64)(x * 977.0) << 17) ^ (u64)(i64)(y * 331.0)
         stroke.debt = 0.0
         stroke.dab_count = 0
-        stroke.dabs = try alloc Dab[dab_limit] in memory.heap
+        stroke.dabs = try new Dab[dab_limit] --- in memory.heap
         try stroke.place(x, y, pen)
         try stroke.stamp(painter, target)
         return stroke
@@ -176,7 +176,7 @@ pub struct Stroke:
     ## brush's dynamics read it. With smoothing the brush trails the pointer
     ## on a string. The dabs wait for `flush` (once a frame), unless there are
     ## too many.
-    pub mutating func extend(painter: Painter*, target: PaintTarget, x: f64, y: f64, pen: Pen = Pen()) -> !:
+    pub func extend(painter: Painter*, target: PaintTarget, x: f64, y: f64, pen: Pen = Pen()) -> !:
         if not self.active:
             error(invalid, "the stroke has ended")
         if not math.is_finite(x) or not math.is_finite(y):
@@ -198,7 +198,7 @@ pub struct Stroke:
 
     ## Walk from the last point to (x, y), queueing a dab every spacing and
     ## carrying the remainder into the next segment; a full queue is stamped.
-    mutating func advance(painter: Painter*, target: PaintTarget, x: f64, y: f64) -> !:
+    func advance(painter: Painter*, target: PaintTarget, x: f64, y: f64) -> !:
         let dx = x - self.last_x
         let dy = y - self.last_y
         let length = math.sqrt(dx * dx + dy * dy)
@@ -216,13 +216,13 @@ pub struct Stroke:
         self.last_y = y
 
     ## Stamp the dabs queued since the last flush: one pass per tile they reach.
-    pub mutating func flush(painter: Painter*, target: PaintTarget) -> !:
+    pub func flush(painter: Painter*, target: PaintTarget) -> !:
         if self.active and self.dab_count > 0:
             try self.stamp(painter, target)
 
     ## The heading and speed after a move of (`dx`, `dy`): the speed is the
     ## distance over the time since the last point that had one, eased.
-    mutating func follow(dx: f64, dy: f64, length: f64):
+    func follow(dx: f64, dy: f64, length: f64):
         if length > 0.0:
             self.direction = math.atan2(dy, dx) * 180.0 / math.pi
         self.untimed += length
@@ -242,7 +242,7 @@ pub struct Stroke:
         return math.max(0.05, response(self.brush.dynamics[dynamic_size], self.inputs(self.pen)))
 
     ## A number in 0..1 from the stroke's generator (xorshift64*).
-    mutating func next_random() -> f64:
+    func next_random() -> f64:
         var state = self.random
         state ^= state >> 12
         state ^= state << 25
@@ -251,13 +251,13 @@ pub struct Stroke:
         return (f64)((state *% 0x2545F4914F6CDD1D) >> 11) / 9007199254740992.0
 
     ## A number in -1..1.
-    mutating func next_signed() -> f64:
+    func next_signed() -> f64:
         return self.next_random() * 2.0 - 1.0
 
     ## Queue the dabs for one step at (x, y) with `pen`: one per scatter
     ## count, each with its own jitter of size, angle, roundness, flow, color
     ## and position, scaled (or turned) by the brush's dynamics.
-    mutating func place(x: f64, y: f64, pen: Pen) -> !:
+    func place(x: f64, y: f64, pen: Pen) -> !:
         let brush = self.brush
         let inputs = self.inputs(pen)
         let size = math.max(0.05, response(brush.dynamics[dynamic_size], inputs))
@@ -303,13 +303,13 @@ pub struct Stroke:
         return &self.before
 
     ## End the stroke, keeping what it painted.
-    pub mutating func finish():
+    pub func finish():
         self.active = false
         self.destroy()
 
     ## Stamp the queued dabs: every tile any of them reaches gets one pass that
     ## draws the paint so far back and each dab over it, then is rebuilt.
-    mutating func stamp(painter: Painter*, target: PaintTarget) -> !:
+    func stamp(painter: Painter*, target: PaintTarget) -> !:
         let tiles = target.tiles
         var min_x = 1.0e18
         var min_y = 1.0e18
@@ -346,12 +346,12 @@ pub struct Stroke:
     ## the new paint is the old one drawn back plus the dabs over it. A capped
     ## stroke's dabs read the paint below them, so they go in passes of dabs
     ## that do not overlap, each pass over the last one's result.
-    mutating func touch(painter: Painter*, tiles: Tiles*, column: u32, row: u32) -> !:
+    func touch(painter: Painter*, tiles: Tiles*, column: u32, row: u32) -> !:
         let origin_x = (f64)(column * tile_size)
         let origin_y = (f64)(row * tile_size)
         var reaching = false
         for index in 0..<self.dab_count:
-            if self.reaches(self.dabs[index], origin_x, origin_y):
+            if Stroke.reaches(self.dabs[index], origin_x, origin_y):
                 reaching = true
         if not reaching:
             return
@@ -361,12 +361,12 @@ pub struct Stroke:
         else:
             # Pass `group` takes the dabs its greedy grouping gave it: each goes
             # in the first pass with none of its dabs in reach of it.
-            var groups = try alloc u16[self.dab_count] in memory.heap
+            var groups = try new u16[self.dab_count] --- in memory.heap
             defer free(groups) in memory.heap
             var count: u16 = 0
             for which in 0..<self.dab_count:
                 groups[which] = 0xFFFF
-                if not self.reaches(self.dabs[which], origin_x, origin_y):
+                if not Stroke.reaches(self.dabs[which], origin_x, origin_y):
                     continue
                 var group: u16 = 0
                 while group < count:
@@ -391,7 +391,7 @@ pub struct Stroke:
     ## One pass over touched cell `index`: its paint copied into the spare
     ## texture, then the dabs of pass `group` (0: every dab reaching the cell)
     ## drawn through `pipeline`; the spare becomes the paint.
-    mutating func pass(painter: Painter*, index: usize, origin_x: f64, origin_y: f64, group: u16, pipeline: gpu.Pipeline) -> !:
+    func pass(painter: Painter*, index: usize, origin_x: f64, origin_y: f64, group: u16, pipeline: gpu.Pipeline) -> !:
         var grown = self.touched[index].spare else try tile_texture(painter.device())
         self.touched[index].spare = none
         errdefer grown.destroy()
@@ -410,7 +410,7 @@ pub struct Stroke:
         for which in 0..<self.dab_count:
             let dab = self.dabs[which]
             if group == 0:
-                if not self.reaches(dab, origin_x, origin_y):
+                if not Stroke.reaches(dab, origin_x, origin_y):
                     continue
             elif self.groups[which] != group - 1:
                 continue
@@ -420,7 +420,7 @@ pub struct Stroke:
             let bottom = math.min((f64)tile_size, dab.y - origin_y + dab.extent + 1.0)
             try gpu.shade(target.value(), pipeline, gpu.Rect(bounds.x, bounds.y, right - bounds.x, bottom - bounds.y), u8[]((u8*)&params[0], 112),
                           [tip_texture, pattern_texture, before], gpu.Filter.nearest)
-        discard(try frame.value().present(gpu.Color(0.0, 0.0, 0.0, 0.0)))
+        _ = try frame.value().present(gpu.Color(0.0, 0.0, 0.0, 0.0))
         self.touched[index].spare = before
         self.touched[index].coverage = grown
 
@@ -452,7 +452,7 @@ pub struct Stroke:
     ## Rebuild the layer tile from the tile before the stroke and the coverage:
     ## into a new tile the first time, then again into that one in place (the
     ## pass covers every texel, and nothing else holds it).
-    mutating func rebuild(painter: Painter*, tiles: Tiles*, index: usize) -> !:
+    func rebuild(painter: Painter*, tiles: Tiles*, index: usize) -> !:
         let entry = self.touched[index]
         if entry.owned and tiles.owns(entry.column, entry.row):
             var existing = (try tiles.texture(entry.column, entry.row)) else trap("an owned tile is missing")
@@ -467,7 +467,7 @@ pub struct Stroke:
 
     ## Draw a touched cell's tile into `texture`: the original through the
     ## coverage (and the selection), in the brush's color or its effect.
-    mutating func paint_tile(painter: Painter*, tiles: Tiles*, entry: Touched, texture: gpu.Texture*) -> !:
+    func paint_tile(painter: Painter*, tiles: Tiles*, entry: Touched, texture: gpu.Texture*) -> !:
         var params: f32[16] = [(f32)self.brush.color.red, (f32)self.brush.color.green, (f32)self.brush.color.blue, 1.0,
                                (f32)(1.0 if self.capped() else self.brush.opacity), 1.0 if self.brush.erase else 0.0, 0.0, 0.0,
                                (f32)(entry.column * tile_size), (f32)(entry.row * tile_size), self.mixing.flag(), 0.0,
@@ -483,11 +483,11 @@ pub struct Stroke:
         defer target.release()
         let original = (try self.before.texture(entry.column, entry.row)) else try self.blank_tile(tiles)
         try gpu.shade(target.value(), painter.paint_pipeline(), gpu.Rect(width = (f64)tile_size, height = (f64)tile_size), u8[]((u8*)&params[0], 64), [original, entry.coverage, clip, effect_tile], gpu.Filter.nearest)
-        discard(try frame.value().present(gpu.Color(0.0, 0.0, 0.0, 0.0)))
+        _ = try frame.value().present(gpu.Color(0.0, 0.0, 0.0, 0.0))
 
     ## The effect's tile at a cell, made by the source the first time; none
     ## where there is no effect.
-    mutating func effect_at(column: u32, row: u32) -> gpu.Texture?!:
+    func effect_at(column: u32, row: u32) -> gpu.Texture?!:
         var effect = self.effect else return none
         if let source = self.source:
             let cell = (usize)row * (usize)effect.columns() + (usize)column
@@ -499,7 +499,7 @@ pub struct Stroke:
         return (try effect.texture(column, row))
 
     ## One tile of the fill color standing in for cells the layer had nothing at.
-    mutating func blank_tile(tiles: Tiles*) -> gpu.Texture!:
+    func blank_tile(tiles: Tiles*) -> gpu.Texture!:
         if let existing = self.empty:
             return existing
         var created = try tiles.blank()
@@ -507,18 +507,18 @@ pub struct Stroke:
             errdefer created.destroy()
             let frame = try created.frame()
             defer frame.release()
-            discard(try frame.value().present(self.fill))
+            _ = try frame.value().present(self.fill)
         self.empty = created
         return created
 
     ## The touched entry for a cell, created on first reach with a cleared coverage tile.
-    mutating func reach(painter: Painter*, column: u32, row: u32) -> usize!:
+    func reach(painter: Painter*, column: u32, row: u32) -> usize!:
         for index in 0..<self.count:
             if self.touched[index].column == column and self.touched[index].row == row:
                 return index
         if self.count == self.touched.length:
             let capacity = 16 if self.touched.length == 0 else self.touched.length * 2
-            let grown = try alloc Touched[capacity] in memory.heap
+            let grown = try new Touched[capacity] --- in memory.heap
             if self.count > 0:
                 memory.copy(grown, self.touched, self.count)
             if self.touched.length > 0:
@@ -528,12 +528,12 @@ pub struct Stroke:
         errdefer coverage.destroy()
         let cleared = try coverage.frame()
         defer cleared.release()
-        discard(try cleared.value().present(gpu.Color(0.0, 0.0, 0.0, 0.0)))
+        _ = try cleared.value().present(gpu.Color(0.0, 0.0, 0.0, 0.0))
         self.touched[self.count] = Touched(column = column, row = row, coverage = coverage, spare = none, owned = false)
         self.count += 1
         return self.count - 1
 
-    mutating func destroy():
+    func destroy():
         for index in 0..<self.count:
             self.touched[index].coverage.destroy()
             if let spare = self.touched[index].spare:
@@ -556,7 +556,7 @@ pub struct Stroke:
         self.before.destroy()
 
     ## Let go of the effect and where it came from.
-    mutating func drop_effect():
+    func drop_effect():
         if let effect = self.effect:
             var owned = effect
             owned.destroy()
@@ -572,19 +572,19 @@ pub struct Stroke:
     ## Paint `effect` (document-aligned tiles, taken) instead of the color: 1
     ## over the original through the coverage, 2 mixed with it. Every tile
     ## reached so far is rebuilt at once, at `opacity`.
-    pub mutating func use_effect(painter: Painter*, target: PaintTarget, effect: Tiles, mode: f64, opacity: f64) -> !:
+    pub func use_effect(painter: Painter*, target: PaintTarget, effect: Tiles, mode: f64, opacity: f64) -> !:
         self.drop_effect()
         try self.use_effect_tiles(painter, target, effect, mode, opacity)
 
     ## Paint an effect `source` makes cell by cell (taken: released when the
     ## stroke ends) instead of the color, as `use_effect`.
-    pub mutating func use_effect_source(painter: Painter*, target: PaintTarget, source: EffectSource, mode: f64, opacity: f64) -> !:
+    pub func use_effect_source(painter: Painter*, target: PaintTarget, source: EffectSource, mode: f64, opacity: f64) -> !:
         self.drop_effect()
         var effect = Tiles.create(painter.device(), self.before.width(), self.before.height()) catch failure:
             source.release(source.context)
             error(failure.code, failure.message)
         let cells = (usize)effect.columns() * (usize)effect.rows()
-        let tried = alloc bool[cells] in memory.heap catch failure:
+        let tried = new bool[cells] --- in memory.heap catch failure:
             effect.destroy()
             source.release(source.context)
             error(failure.code, failure.message)
@@ -595,7 +595,7 @@ pub struct Stroke:
         try self.use_effect_tiles(painter, target, effect, mode, opacity)
 
     ## Install `effect` without dropping the source, and rebuild what is reached.
-    mutating func use_effect_tiles(painter: Painter*, target: PaintTarget, effect: Tiles, mode: f64, opacity: f64) -> !:
+    func use_effect_tiles(painter: Painter*, target: PaintTarget, effect: Tiles, mode: f64, opacity: f64) -> !:
         if let previous = self.effect:
             var owned = previous
             owned.destroy()
@@ -690,7 +690,7 @@ test "a light stroke keeps its color where it is soft, however many flushes buil
         try stroke.extend(&painter, target, 40.0 + (f64)step * 5.0, 150.0)
         try stroke.flush(&painter, target)
     stroke.finish()
-    let pixels = try alloc f32[(usize)300 * 300 * 4] in memory.heap
+    let pixels = try new f32[(usize)300 * 300 * 4] --- in memory.heap
     defer free(pixels) in memory.heap
     try tiles.read(pixels)
     # Down the soft edge, partial coverage is white paint, never darker.
@@ -723,7 +723,7 @@ test "a stroke paints and erases only the tiles it reaches":
     stroke.finish()
     assert(tiles.painted(0, 0) and tiles.painted(1, 0) and not tiles.painted(0, 1) and not tiles.painted(2, 0))
     let count = (usize)600 * 300 * 4
-    let pixels = try alloc f32[count] in memory.heap
+    let pixels = try new f32[count] --- in memory.heap
     defer free(pixels) in memory.heap
     try tiles.read(pixels)
     let centre = (150 * 600 + 250) * 4

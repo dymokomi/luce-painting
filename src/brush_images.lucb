@@ -52,7 +52,7 @@ pub struct BrushImages:
     ## Take a copy of `pixels`, `width` × `height` coverage bytes, as the tip;
     ## no pixels go back to the round tip. The same tip again changes nothing,
     ## so an editor may set it before every stroke.
-    pub mutating func set_tip(pixels: const u8[], width: usize, height: usize) -> !:
+    pub func set_tip(pixels: const u8[], width: usize, height: usize) -> !:
         try check_image(pixels, width, height)
         if width == self.tip_width and height == self.tip_height and same_bytes(pixels, self.tip):
             return
@@ -64,7 +64,7 @@ pub struct BrushImages:
         self.tip_height = height
 
     ## Take a copy of `pixels` as the texture image (kind 4); none drops it.
-    pub mutating func set_pattern(pixels: const u8[], width: usize, height: usize) -> !:
+    pub func set_pattern(pixels: const u8[], width: usize, height: usize) -> !:
         try check_image(pixels, width, height)
         if width == self.pattern_width and height == self.pattern_height and same_bytes(pixels, self.pattern):
             return
@@ -93,7 +93,7 @@ pub struct BrushImages:
 
     ## The tip on `device` for a dab `diameter` pixels across: the smallest
     ## copy still at least that big, made on first use; none without a tip.
-    pub mutating func tip_for(device: gpu.Device, diameter: f64) -> Sampled?!:
+    pub func tip_for(device: gpu.Device, diameter: f64) -> Sampled?!:
         if self.tip.length == 0:
             return none
         if self.level_count == 0:
@@ -106,7 +106,7 @@ pub struct BrushImages:
 
     ## The texture of `kind` on `device` (a built-in, or the image), made on
     ## first use; none for no texture, or for the image when none is set.
-    pub mutating func pattern_for(device: gpu.Device, kind: i64) -> Sampled?!:
+    pub func pattern_for(device: gpu.Device, kind: i64) -> Sampled?!:
         if kind == texture_none or (kind == texture_image and self.pattern.length == 0):
             return none
         if kind < 0 or kind > texture_image:
@@ -133,7 +133,7 @@ pub struct BrushImages:
         return Sampled(texture = texture, width = width, height = height)
 
     ## The chain: the tip, then each half of the last, down to 8 pixels.
-    mutating func make_levels(device: gpu.Device) -> !:
+    func make_levels(device: gpu.Device) -> !:
         var width = self.tip_width
         var height = self.tip_height
         var current = try copy_bytes(self.tip)
@@ -152,7 +152,7 @@ pub struct BrushImages:
             width = half_width
             height = half_height
 
-    mutating func drop_tip():
+    func drop_tip():
         for index in 0..<self.level_count:
             self.levels[index].texture.destroy()
         self.level_count = 0
@@ -163,14 +163,14 @@ pub struct BrushImages:
         self.tip_width = 0
         self.tip_height = 0
 
-    mutating func drop_pattern_texture():
+    func drop_pattern_texture():
         if let texture = self.pattern_texture:
             var owned = texture
             owned.destroy()
         self.pattern_texture = none
         self.pattern_made = false
 
-    mutating func drop_pattern():
+    func drop_pattern():
         if self.pattern_kind == texture_image:
             self.drop_pattern_texture()
         if self.pattern.length > 0:
@@ -181,7 +181,7 @@ pub struct BrushImages:
         self.pattern_height = 0
 
     ## Let the images and their textures go.
-    pub mutating func destroy():
+    pub func destroy():
         self.drop_tip()
         self.drop_pattern_texture()
         self.drop_pattern()
@@ -201,7 +201,7 @@ func same_bytes(a: const u8[], b: const u8[]) -> bool:
     return true
 
 func copy_bytes(pixels: const u8[]) -> u8[]!:
-    let copy = try alloc u8[pixels.length] in memory.heap
+    let copy = try new u8[pixels.length] --- in memory.heap
     memory.copy(copy, pixels, pixels.length)
     return copy
 
@@ -217,7 +217,7 @@ func math_max(a: usize, b: usize) -> usize:
 ## `pixels` (`width` × `height`) averaged down to `to_width` × `to_height`, each
 ## target pixel the mean of the source pixels it covers.
 pub func halve(pixels: const u8[], width: usize, height: usize, to_width: usize, to_height: usize) -> u8[]!:
-    let out = try alloc u8[to_width * to_height] in memory.heap
+    let out = try new u8[to_width * to_height] --- in memory.heap
     for y in 0..<to_height:
         let top = y * height // to_height
         let bottom = math_max(top + 1, (y + 1) * height // to_height)
@@ -236,7 +236,7 @@ pub func halve(pixels: const u8[], width: usize, height: usize, to_width: usize,
 ## pixels) or dots (a round hole every 8 pixels).
 pub func builtin_pattern(kind: i64) -> u8[]!:
     let side = builtin_side
-    let pixels = try alloc u8[side * side] in memory.heap
+    let pixels = try new u8[side * side] --- in memory.heap
     # Grain: 64 cells of 4 pixels a side, wrapping, blended bilinearly.
     let cells: usize = 64
     for y in 0..<side:
@@ -278,7 +278,7 @@ test "a tip's chain halves down to eight pixels, and a dab takes the smallest co
     defer device.destroy()
     var images = BrushImages()
     defer images.destroy()
-    let pixels = try alloc u8[(usize)100 * 50] in memory.heap
+    let pixels = try new u8[(usize)100 * 50] --- in memory.heap
     defer free(pixels) in memory.heap
     for index in 0..<pixels.length:
         pixels[index] = 255

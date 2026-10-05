@@ -49,8 +49,8 @@ pub struct EncodingTables:
     pub var encoded: f32[]
     var decoding: transfer.SrgbTable
 
-    pub static func create() -> EncodingTables!:
-        let encoded = try alloc f32[65536] in memory.heap
+    pub func create() -> EncodingTables!:
+        let encoded = try new f32[65536] --- in memory.heap
         errdefer free(encoded) in memory.heap
         for bits in 0..<(usize)65536:
             let value = (f64)from_half((u16)bits)
@@ -66,7 +66,7 @@ pub struct EncodingTables:
     pub func decode(value: f32) -> f32:
         return self.decoding.decode(value)
 
-    pub mutating func destroy():
+    pub func destroy():
         if self.encoded.length > 0:
             free(self.encoded) in memory.heap
         self.decoding.destroy()
