@@ -47,9 +47,7 @@ See [docs/DESIGN.md](docs/DESIGN.md) for how a stroke becomes tiles.
 
 ## Test
 
-`./test.sh` runs every module's tests natively and through the C backend with
-the sibling `luce-base` checkout's compiler (`--base` picks another). GPU tests
-skip where no device opens.
+`luc test` runs every module's tests. GPU tests skip where no device opens.
 
 The shaders are generated: after changing one, run
 
